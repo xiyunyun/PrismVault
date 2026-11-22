@@ -77,7 +77,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "PrismVault"
+      "shortcutName": "PrismVault",
+      "include": "resources/installer.nsh"
     }
   }
 }
