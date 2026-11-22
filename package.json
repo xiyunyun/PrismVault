@@ -1,0 +1,83 @@
+{
+  "name": "prismvault",
+  "version": "0.1.0",
+  "description": "PrismVault (棱镜匣) — Cross-drive zero-copy indexed media asset manager",
+  "author": "Xiyun (熙云) <1619947679@qq.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/xiyunyun/PrismVault",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xiyunyun/PrismVault.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xiyunyun/PrismVault/issues"
+  },
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "package": "electron-vite build && electron-builder --win"
+  },
+  "dependencies": {
+    "ag-psd": "^34.2.2",
+    "chokidar": "^4.0.3",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.475.0",
+    "music-metadata": "^10.6.4",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "sharp": "^0.33.5",
+    "tailwind-merge": "^3.0.1",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.9",
+    "@types/node": "^22.13.5",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^35.0.3",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^3.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwindcss": "^4.0.9",
+    "typescript": "^5.7.3",
+    "vite": "^6.2.0"
+  },
+  "build": {
+    "appId": "com.prismvault.app",
+    "productName": "PrismVault",
+    "directories": {
+      "buildResources": "resources",
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*",
+      "resources/icon.png"
+    ],
+    "win": {
+      "icon": "resources/icon.ico",
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "zip",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "PrismVault"
+    }
+  }
+}

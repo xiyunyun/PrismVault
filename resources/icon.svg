@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="pv-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b1020"/>
+      <stop offset="50%" stop-color="#12264a"/>
+      <stop offset="100%" stop-color="#0a4a7a"/>
+    </linearGradient>
+    <radialGradient id="pv-glow" cx="50%" cy="44%" r="52%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.38"/>
+      <stop offset="55%" stop-color="#6366f1" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#0b1020" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="pv-vault" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.20"/>
+      <stop offset="100%" stop-color="#60cdff" stop-opacity="0.06"/>
+    </linearGradient>
+    <linearGradient id="pv-left-facet" x1="20%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%" stop-color="#e0f7ff"/>
+      <stop offset="100%" stop-color="#60cdff"/>
+    </linearGradient>
+    <linearGradient id="pv-right-facet" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7dd3fc"/>
+      <stop offset="55%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#6366f1"/>
+    </linearGradient>
+    <linearGradient id="pv-bottom-facet" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="50%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#f472b6"/>
+    </linearGradient>
+    <linearGradient id="pv-ray-1" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="pv-ray-2" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#a78bfa" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#a78bfa" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="pv-ray-3" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#34d399" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#34d399" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="pv-shadow" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#020617" flood-opacity="0.5"/>
+    </filter>
+  </defs>
+
+  <!-- Fluent Squircle Base -->
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="url(#pv-bg)"/>
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="url(#pv-glow)"/>
+  <rect x="28" y="28" width="456" height="456" rx="108" fill="none" stroke="#ffffff" stroke-opacity="0.16" stroke-width="4"/>
+
+  <!-- Geometric Vault Frame (Hexagonal / Octagonal Sleek Chamber) -->
+  <rect x="86" y="86" width="340" height="340" rx="68" fill="url(#pv-vault)" stroke="#7dd3fc" stroke-opacity="0.28" stroke-width="3"/>
+
+  <!-- Spectral Refraction Rays (Images / Video / Audio / Docs) -->
+  <path d="M 310 250 L 434 198 L 434 224 L 316 268 Z" fill="url(#pv-ray-1)"/>
+  <path d="M 316 268 L 434 252 L 434 280 L 320 288 Z" fill="url(#pv-ray-2)"/>
+  <path d="M 320 288 L 434 306 L 434 332 L 312 308 Z" fill="url(#pv-ray-3)"/>
+
+  <!-- Incoming Clean White Light Beam -->
+  <path d="M 78 266 L 194 250 L 186 274 L 78 286 Z" fill="#ffffff" fill-opacity="0.55"/>
+
+  <!-- Central Faceted Crystal Prism -->
+  <g filter="url(#pv-shadow)">
+    <!-- Left luminous facet -->
+    <polygon points="256,112 140,354 256,306" fill="url(#pv-left-facet)"/>
+    <!-- Right deep sapphire facet -->
+    <polygon points="256,112 372,354 256,306" fill="url(#pv-right-facet)"/>
+    <!-- Bottom spectral base facet -->
+    <polygon points="140,354 256,306 372,354 256,386" fill="url(#pv-bottom-facet)"/>
+    <!-- Crisp inner highlight ridge -->
+    <line x1="256" y1="112" x2="256" y2="306" stroke="#ffffff" stroke-opacity="0.85" stroke-width="4" stroke-linecap="round"/>
+    <polygon points="256,112 140,354 256,386 372,354" fill="none" stroke="#ffffff" stroke-opacity="0.55" stroke-width="3" stroke-linejoin="round"/>
+  </g>
+</svg>
