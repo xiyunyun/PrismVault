@@ -1,6 +1,6 @@
 {
   "name": "prismvault",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "PrismVault (棱镜匣) — Cross-drive zero-copy indexed media asset manager",
   "author": "Xiyun (熙云) <1619947679@qq.com>",
   "license": "MIT",
@@ -65,22 +65,17 @@
       "out/**/*",
       "resources/icon.png"
     ],
+    "extraResources": [
+      {
+        "from": "node_modules/@mlightcad/libredwg-web/wasm/libredwg-web.wasm",
+        "to": "wasm/libredwg-web.wasm"
+      }
+    ],
     "asarUnpack": [
       "out/main/cadWorker.js",
       "out/main/chunks/**/*",
-      "node_modules/@mlightcad/libredwg-web/**/*",
-      "node_modules/dxf-parser/**/*",
-      "node_modules/loglevel/**/*",
-      "node_modules/sharp/**/*",
-      "node_modules/@img/**/*",
-      "node_modules/color/**/*",
-      "node_modules/color-convert/**/*",
-      "node_modules/color-name/**/*",
-      "node_modules/color-string/**/*",
-      "node_modules/simple-swizzle/**/*",
-      "node_modules/is-arrayish/**/*",
-      "node_modules/detect-libc/**/*",
-      "node_modules/semver/**/*"
+      "**/node_modules/sharp/**/*",
+      "**/node_modules/@img/**/*"
     ],
     "win": {
       "icon": "resources/icon.ico",

@@ -2,7 +2,7 @@ import fs from 'fs'
 import fsp from 'fs/promises'
 import path from 'path'
 import { createRequire } from 'module'
-import { parentPort } from 'worker_threads'
+import { parentPort, workerData } from 'worker_threads'
 import DxfParser from 'dxf-parser'
 import {
   createModule,
@@ -1013,14 +1013,44 @@ function packScene(col: RawSegmentCollector): {
 
 let libreDwgPromise: Promise<LibreDwgEx> | null = null
 
+function resolveLibreDwgWasmPath(): string {
+  const candidates: string[] = []
+  const data = workerData as { wasmPath?: string; resourcesPath?: string } | null | undefined
+
+  if (data?.wasmPath) candidates.push(data.wasmPath)
+  if (data?.resourcesPath) {
+    candidates.push(path.join(data.resourcesPath, 'wasm', 'libredwg-web.wasm'))
+  }
+  if (process.resourcesPath) {
+    candidates.push(path.join(process.resourcesPath, 'wasm', 'libredwg-web.wasm'))
+  }
+
+  // Dev & unpacked node_modules fallbacks
+  candidates.push(
+    path.resolve(__dirname, '../../node_modules/@mlightcad/libredwg-web/wasm/libredwg-web.wasm'),
+    path.resolve(process.cwd(), 'node_modules/@mlightcad/libredwg-web/wasm/libredwg-web.wasm')
+  )
+
+  try {
+    const entryPath = require.resolve('@mlightcad/libredwg-web')
+    const pkgRoot = path.resolve(path.dirname(entryPath), '..')
+    const rawWasmPath = path.join(pkgRoot, 'wasm', 'libredwg-web.wasm')
+    const unpackedWasmPath = rawWasmPath.replace(/app\.asar([\\/])/, 'app.asar.unpacked$1')
+    candidates.push(unpackedWasmPath, rawWasmPath)
+  } catch {
+    // Bundled mode may not have @mlightcad/libredwg-web in app.asar.unpacked/node_modules
+  }
+
+  for (const p of candidates) {
+    if (p && fs.existsSync(p)) return p
+  }
+  throw new Error(`找不到 LibreDWG WASM 解析内核（已检测路径：${candidates[0] || 'resources/wasm/libredwg-web.wasm'}）`)
+}
+
 async function getLibreDwg(): Promise<LibreDwgEx> {
   if (!libreDwgPromise) {
     libreDwgPromise = (async () => {
-      const entryPath = require.resolve('@mlightcad/libredwg-web')
-      const pkgRoot = path.resolve(path.dirname(entryPath), '..')
-      const rawWasmPath = path.join(pkgRoot, 'wasm', 'libredwg-web.wasm')
-      const unpackedWasmPath = rawWasmPath.replace(/app\.asar([\\/])/, 'app.asar.unpacked$1')
-      const wasmPath = fs.existsSync(unpackedWasmPath) ? unpackedWasmPath : rawWasmPath
+      const wasmPath = resolveLibreDwgWasmPath()
       const wasmBinary = fs.readFileSync(wasmPath)
       const rawCreate = createModule as unknown as
         | ((opts?: Record<string, unknown>) => Promise<unknown>)

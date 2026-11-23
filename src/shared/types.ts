@@ -215,6 +215,8 @@ export interface AppSettings {
   previewWheelMode: 'zoom' | 'navigate'
   includeOtherFiles: boolean
   autoScanOnStartup: boolean
+  closeToTray: boolean
+  autoLaunch: boolean
   autoCheckUpdates: boolean
   updateMirrorUrl: string
   deleteThumbsOnRemoveSource: boolean

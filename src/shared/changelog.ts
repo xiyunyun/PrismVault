@@ -10,6 +10,16 @@ export interface VersionChangelogEntry {
  * Always available offline without waiting for network requests.
  */
 export const VERSION_CHANGELOGS: Record<string, VersionChangelogEntry> = {
+  '0.4.0': {
+    version: '0.4.0',
+    title: '系统托盘后台驻留、开机自启与打包版 CAD 预览修复',
+    date: '2026-11-23',
+    notes: [
+      '- **关闭隐藏至系统托盘（默认开启）**：点击关闭按钮自动最小化至右下角托盘后台运行，点击图标瞬间呼出、右键可同步或彻底退出，并支持单实例防多开（可在「设置 → 操作与交互」切换）。',
+      '- **开机自动启动（默认开启）**：打包版自动同步 Windows 登录启动项，配合托盘驻留开机静默进后台不打扰桌面。',
+      '- **修复打包版 DWG / DXF 预览报错**：CAD 工作线程全面自包含打包并独立内置 LibreDWG WASM 内核，彻底解决打包版提示缺少 `dxf-parser` 的问题。'
+    ].join('\n')
+  },
   '0.3.0': {
     version: '0.3.0',
     title: '3D / CAD 离线预览、棱镜流光与云母界面焕新及免代理云更新',

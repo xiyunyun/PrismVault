@@ -5,7 +5,7 @@ import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
+    plugins: [externalizeDepsPlugin({ exclude: ['dxf-parser', '@mlightcad/libredwg-web'] })],
     build: {
       rollupOptions: {
         input: {

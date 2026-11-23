@@ -44,7 +44,15 @@ class CadWorkerPool {
     const rawWorkerPath = path.join(__dirname, 'cadWorker.js')
     const unpackedWorkerPath = rawWorkerPath.replace(/app\.asar([\\/])/, 'app.asar.unpacked$1')
     const workerPath = fs.existsSync(unpackedWorkerPath) ? unpackedWorkerPath : rawWorkerPath
-    const w = new Worker(workerPath)
+    const packagedWasmPath = process.resourcesPath
+      ? path.join(process.resourcesPath, 'wasm', 'libredwg-web.wasm')
+      : undefined
+    const w = new Worker(workerPath, {
+      workerData: {
+        resourcesPath: process.resourcesPath || '',
+        wasmPath: packagedWasmPath && fs.existsSync(packagedWasmPath) ? packagedWasmPath : undefined
+      }
+    })
 
     w.on('message', (msg: { id: number; result: CadPreviewData }) => {
       if (this.activeJob && this.activeJob.id === msg.id) {

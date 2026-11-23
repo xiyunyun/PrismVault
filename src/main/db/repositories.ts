@@ -43,6 +43,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   previewWheelMode: 'zoom',
   includeOtherFiles: false,
   autoScanOnStartup: false,
+  closeToTray: true,
+  autoLaunch: true,
   autoCheckUpdates: true,
   updateMirrorUrl: '',
   deleteThumbsOnRemoveSource: true,

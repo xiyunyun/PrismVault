@@ -56,7 +56,7 @@ import {
   migrateClipboardDir
 } from '../indexer/clipboardImport'
 import { inspectEagleLibrary, migrateFromEagle } from '../indexer/eagleMigrator'
-import { resolveEffectiveBackdropStyle, syncWindowAppearance } from '../index'
+import { resolveEffectiveBackdropStyle, syncAutoLaunch, syncTrayPresence, syncWindowAppearance } from '../index'
 import { invalidateMediaProtocolCache } from '../protocol'
 import { cloudUpdater, getAppInfo } from '../updater'
 import type {
@@ -429,6 +429,12 @@ export function registerIpcHandlers(): void {
 
     if (safePatch.theme !== undefined || safePatch.backdropStyle !== undefined) {
       syncWindowAppearance(normalized.theme, normalized.backdropStyle)
+    }
+    if (safePatch.closeToTray !== undefined) {
+      syncTrayPresence(normalized.closeToTray)
+    }
+    if (safePatch.autoLaunch !== undefined) {
+      syncAutoLaunch(normalized.autoLaunch)
     }
     if (safePatch.ffmpegPath !== undefined) {
       await resolveFfmpeg(true)

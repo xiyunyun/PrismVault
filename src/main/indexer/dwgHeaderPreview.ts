@@ -1,11 +1,71 @@
 import fsp from 'fs/promises'
-import sharp from 'sharp'
+import zlib from 'zlib'
 
 // Official Open Design Specification DWG AcDb:Preview 16-byte start sentinel
 const DWG_PREVIEW_SENTINEL = Buffer.from([
   0x1f, 0x25, 0x6d, 0x07, 0xd4, 0x36, 0x28, 0x28,
   0x9d, 0x57, 0xca, 0x3f, 0x9d, 0x44, 0x10, 0x2b
 ])
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256)
+  for (let i = 0; i < 256; i++) {
+    let c = i
+    for (let k = 0; k < 8; k++) {
+      c = (c & 1) !== 0 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+    }
+    table[i] = c >>> 0
+  }
+  return table
+})()
+
+function crc32(buf: Buffer): number {
+  let c = 0xffffffff
+  for (let i = 0; i < buf.length; i++) {
+    c = CRC32_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8)
+  }
+  return (c ^ 0xffffffff) >>> 0
+}
+
+function makePngChunk(type: string, data: Buffer): Buffer {
+  const typeBuf = Buffer.from(type, 'ascii')
+  const lenBuf = Buffer.alloc(4)
+  lenBuf.writeUInt32BE(data.length, 0)
+  const crcBuf = Buffer.alloc(4)
+  crcBuf.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])), 0)
+  return Buffer.concat([lenBuf, typeBuf, data, crcBuf])
+}
+
+/**
+ * Zero-dependency pure-Node PNG encoder for decoded RGBA buffers so worker threads
+ * never require native sharp binaries from app.asar.unpacked.
+ */
+function encodeRgbaToPng(rgba: Buffer, width: number, height: number): Buffer {
+  const stride = width * 4
+  const raw = Buffer.alloc((stride + 1) * height)
+  for (let y = 0; y < height; y++) {
+    const rowOff = y * (stride + 1)
+    raw[rowOff] = 0 // Filter type 0 (None)
+    rgba.copy(raw, rowOff + 1, y * stride, (y + 1) * stride)
+  }
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(width, 0)
+  ihdr.writeUInt32BE(height, 4)
+  ihdr[8] = 8 // bit depth
+  ihdr[9] = 6 // color type: RGBA
+  ihdr[10] = 0
+  ihdr[11] = 0
+  ihdr[12] = 0
+
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  const compressed = zlib.deflateSync(raw, { level: 6 })
+  return Buffer.concat([
+    signature,
+    makePngChunk('IHDR', ihdr),
+    makePngChunk('IDAT', compressed),
+    makePngChunk('IEND', Buffer.alloc(0))
+  ])
+}
 
 /**
  * Pure-JS Windows BMP / raw DIB (BITMAPINFOHEADER) decoder -> RGBA buffer for sharp.
@@ -111,16 +171,15 @@ export async function decodeDwgThumbBytesToPng(data: Uint8Array, code: number): 
       code === 6 ||
       (data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47)
     ) {
-      return await sharp(Buffer.from(data)).png().toBuffer()
+      if (data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47) {
+        return Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+      }
+      return null
     }
     if (code === 2) {
       const decoded = decodeBmpOrDibToRgba(data)
       if (!decoded) return null
-      return await sharp(decoded.rgba, {
-        raw: { width: decoded.width, height: decoded.height, channels: 4 }
-      })
-        .png()
-        .toBuffer()
+      return encodeRgbaToPng(decoded.rgba, decoded.width, decoded.height)
     }
   } catch {
     // ignore unsupported formats (e.g. WMF = 3)

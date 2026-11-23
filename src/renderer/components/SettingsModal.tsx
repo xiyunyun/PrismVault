@@ -24,6 +24,7 @@ import {
   Mouse,
   PackageCheck,
   Palette,
+  Power,
   RefreshCw,
   RotateCcw,
   Scale,
@@ -1020,6 +1021,85 @@ export const SettingsModal: React.FC = () => {
             {/* ==================== TAB 3: Controls & Interaction ==================== */}
             {tab === 'controls' && (
               <div className="space-y-4">
+                {/* Background Tray Residency & Auto-Launch */}
+                <div
+                  className="rounded-lg border p-4 space-y-3"
+                  style={{ backgroundColor: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)' }}
+                >
+                  <div className="flex items-center gap-2 text-sm font-semibold">
+                    <Power className="w-4 h-4" style={{ color: 'var(--accent)' }} />
+                    <span>后台驻留与开机自启</span>
+                  </div>
+
+                  <label
+                    className="flex items-start justify-between gap-3 p-3 rounded-lg border cursor-pointer hover:border-[var(--border-strong)] transition-colors"
+                    style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
+                  >
+                    <div className="space-y-0.5">
+                      <div className="text-xs font-semibold" style={{ color: 'var(--text-primary)' }}>
+                        关闭窗口时隐藏到系统托盘（后台运行）
+                      </div>
+                      <div className="text-[0.72rem] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                        开启后点击右上角关闭按钮将最小化到右下角任务栏托盘继续后台运行，点击托盘图标可瞬间呼出，右键托盘图标可彻底退出；关闭此项则直接退出程序。
+                      </div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.closeToTray !== false}
+                      onChange={async (e) => {
+                        await updateSettings({ closeToTray: e.target.checked })
+                        showToast(
+                          e.target.checked
+                            ? '已开启关闭时隐藏至系统托盘（后台运行）'
+                            : '已切换为关闭窗口时直接退出软件',
+                          'success'
+                        )
+                      }}
+                      className="w-4 h-4 mt-0.5 accent-[var(--accent-solid)] cursor-pointer shrink-0"
+                    />
+                  </label>
+
+                  <label
+                    className="flex items-start justify-between gap-3 p-3 rounded-lg border cursor-pointer hover:border-[var(--border-strong)] transition-colors"
+                    style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
+                  >
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-semibold" style={{ color: 'var(--text-primary)' }}>
+                          开机自动启动
+                        </span>
+                        {appInfo && !appInfo.isPackaged && (
+                          <span
+                            className="text-[0.66rem] px-1.5 py-0.2 rounded-full"
+                            style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-muted)' }}
+                          >
+                            打包版生效
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[0.72rem] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                        随 Windows 登录自动启动 PrismVault；若同时开启「隐藏到系统托盘」，开机时将静默驻留后台不打扰桌面。
+                      </div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.autoLaunch !== false}
+                      onChange={async (e) => {
+                        await updateSettings({ autoLaunch: e.target.checked })
+                        showToast(
+                          e.target.checked
+                            ? appInfo && !appInfo.isPackaged
+                              ? '已保存开启开机自启（正式打包安装后自动生效）'
+                              : '已开启开机自动启动'
+                            : '已关闭开机自动启动',
+                          'success'
+                        )
+                      }}
+                      className="w-4 h-4 mt-0.5 accent-[var(--accent-solid)] cursor-pointer shrink-0"
+                    />
+                  </label>
+                </div>
+
                 {/* Preview Mouse Wheel Interaction Mode */}
                 <div
                   className="rounded-lg border p-4 space-y-3"
