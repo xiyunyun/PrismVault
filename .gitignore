@@ -10,3 +10,6 @@ Thumbs.db
 .env.local
 *.local
 PROJECT_MEMORY.md
+SPEC.md
+promo-video/
+promo_video_script.md
