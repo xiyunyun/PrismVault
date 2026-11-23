@@ -125,8 +125,116 @@ export interface AppSettings {
   ffmpegPath: string
   thumbCacheDir: string
   clipboardDir: string
+  clipboardMaxFiles: number
+  clipboardMaxSizeMB: number
+  previewWheelMode: 'zoom' | 'navigate'
   includeOtherFiles: boolean
   autoScanOnStartup: boolean
+  autoCheckUpdates: boolean
+  updateMirrorUrl: string
+}
+
+export type AppInstallType = 'installer' | 'portable' | 'dev'
+
+export interface AppInfo {
+  version: string
+  installType: AppInstallType
+  isPackaged: boolean
+  platform: string
+  arch: string
+  repoUrl: string
+  releasesUrl: string
+}
+
+export interface UpdateAssetInfo {
+  name: string
+  size: number
+  downloadUrl: string
+  kind: 'installer' | 'portable'
+}
+
+export interface UpdateReleaseInfo {
+  version: string
+  tagName: string
+  name: string
+  notes: string
+  publishedAt: string | null
+  htmlUrl: string
+  installerAsset: UpdateAssetInfo | null
+  portableAsset: UpdateAssetInfo | null
+  recommendedAsset: UpdateAssetInfo | null
+}
+
+export interface UpdateDownloadProgress {
+  fileName: string
+  filePath: string
+  kind: 'installer' | 'portable'
+  transferredBytes: number
+  totalBytes: number
+  percent: number
+  bytesPerSecond: number
+}
+
+export type UpdateStatus =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'up-to-date'
+  | 'downloading'
+  | 'downloaded'
+  | 'error'
+
+export interface UpdateState {
+  status: UpdateStatus
+  currentVersion: string
+  installType: AppInstallType
+  release: UpdateReleaseInfo | null
+  download: UpdateDownloadProgress | null
+  error: string | null
+  checkedAt: number | null
+  silent: boolean
+}
+
+export interface UpdateInstallResult {
+  ok: boolean
+  action: 'launched-installer' | 'revealed-portable' | 'error'
+  filePath?: string
+  error?: string
+}
+
+export type ConflictResolution = 'replace' | 'skip' | 'keep_both'
+
+export interface ImportConflictItem {
+  incomingPath: string
+  fileName: string
+  incomingSize: number
+  incomingModifiedAt: number
+  incomingWidth?: number | null
+  incomingHeight?: number | null
+  incomingMediaType: MediaType
+  incomingExt: string
+  incomingThumbDataUrl?: string | null
+  incomingTextSnippet?: string | null
+  existingAsset: Asset
+}
+
+export interface ClipboardInspectResult {
+  hasContent: boolean
+  kind: 'files' | 'image' | 'empty'
+  fileCount: number
+  totalBytes: number
+  filePaths?: string[]
+  conflicts: ImportConflictItem[]
+  reason?: string
+}
+
+export interface ClipboardImportResult {
+  ok: boolean
+  assets: Asset[]
+  importedCount: number
+  replacedCount: number
+  skippedCount: number
+  reason?: string
 }
 
 export interface MoveThumbCacheResult {
@@ -237,9 +345,25 @@ export interface XiyunApi {
     openExternalUrl: (url: string) => Promise<void>
     copyPath: (filePath: string) => Promise<void>
     checkFfmpeg: () => Promise<FfmpegStatus>
+    getPathForFile: (file: File) => string
+    getAppInfo: () => Promise<AppInfo>
+  }
+  updater: {
+    getState: () => Promise<UpdateState>
+    check: (opts?: { silent?: boolean }) => Promise<UpdateState>
+    download: (kind?: 'installer' | 'portable') => Promise<UpdateState>
+    cancelDownload: () => Promise<UpdateState>
+    install: () => Promise<UpdateInstallResult>
+    openReleasesPage: () => Promise<void>
   }
   clipboard: {
-    pasteImage: (targetGroupId?: number | null) => Promise<{ ok: boolean; asset?: Asset; reason?: string }>
+    inspect: () => Promise<ClipboardInspectResult>
+    inspectPaths: (paths: string[]) => Promise<ClipboardInspectResult>
+    commitImport: (opts: {
+      targetGroupId?: number | null
+      filePaths?: string[]
+      resolutions?: Record<string, ConflictResolution>
+    }) => Promise<ClipboardImportResult>
     getStats: () => Promise<ClipboardStats>
     pickAndMoveDir: () => Promise<MoveThumbCacheResult | null>
     resetDir: () => Promise<MoveThumbCacheResult | null>
@@ -254,5 +378,6 @@ export interface XiyunApi {
     onThumbReady: (cb: (payload: { assetId: number; thumbPath: string; width?: number | null; height?: number | null }) => void) => () => void
     onAssetsChanged: (cb: () => void) => () => void
     onEagleProgress: (cb: (progress: EagleMigrationProgress) => void) => () => void
+    onUpdateState: (cb: (state: UpdateState) => void) => () => void
   }
 }

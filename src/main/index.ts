@@ -7,6 +7,7 @@ import { MEDIA_SCHEME, registerMediaProtocol } from './protocol'
 import { registerIpcHandlers } from './ipc'
 import { watcherManager } from './indexer/watcher'
 import { indexScanner } from './indexer/scanner'
+import { cloudUpdater } from './updater'
 
 // Must be called before app.whenReady()
 protocol.registerSchemesAsPrivileged([
@@ -84,15 +85,26 @@ function createMainWindow(): BrowserWindow {
 
 app.whenReady().then(() => {
   initDatabase()
+  cloudUpdater.init()
   registerMediaProtocol()
   registerIpcHandlers()
   watcherManager.initAll()
 
-  createMainWindow()
+  const mainWin = createMainWindow()
 
   const settings = getAllSettings()
   if (settings.autoScanOnStartup) {
     indexScanner.scanSource().catch(() => undefined)
+  }
+
+  if (settings.autoCheckUpdates) {
+    mainWin.webContents.once('did-finish-load', () => {
+      setTimeout(() => {
+        if (getAllSettings().autoCheckUpdates) {
+          cloudUpdater.checkForUpdates({ silent: true }).catch(() => undefined)
+        }
+      }, 3000)
+    })
   }
 
   app.on('activate', () => {

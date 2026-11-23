@@ -31,12 +31,15 @@ import { thumbnailQueue } from '../indexer/thumbnailer'
 import { watcherManager } from '../indexer/watcher'
 import { resolveFfmpeg } from '../indexer/ffmpeg'
 import {
+  commitClipboardImport,
   getClipboardStats,
-  migrateClipboardDir,
-  pasteImageFromClipboard
+  inspectClipboard,
+  inspectImportPaths,
+  migrateClipboardDir
 } from '../indexer/clipboardImport'
 import { inspectEagleLibrary, migrateFromEagle } from '../indexer/eagleMigrator'
 import { syncWindowTitleBarTheme } from '../index'
+import { cloudUpdater, getAppInfo } from '../updater'
 import type {
   AppSettings,
   AssetQueryFilter,
@@ -103,6 +106,7 @@ export function registerIpcHandlers(): void {
   indexScanner.onProgress((progress) => broadcast('event:scan-progress', progress))
   indexScanner.onAssetsChanged(() => broadcast('event:assets-changed'))
   thumbnailQueue.onReady((payload) => broadcast('event:thumb-ready', payload))
+  cloudUpdater.onStateChange((state) => broadcast('event:update-state', state))
 
   // ===================== Sources =====================
   ipcMain.handle('sources:list', () => listSourceRoots())
@@ -418,15 +422,38 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('system:checkFfmpeg', () => resolveFfmpeg(true))
+  ipcMain.handle('system:getAppInfo', () => getAppInfo())
 
-  // ===================== Clipboard Image Import =====================
-  ipcMain.handle('clipboard:pasteImage', async (_e, targetGroupId?: number | null) => {
-    const res = await pasteImageFromClipboard(targetGroupId)
-    if (res.ok) {
-      broadcast('event:assets-changed')
+  // ===================== Cloud Updater (GitHub Releases) =====================
+  ipcMain.handle('updater:getState', () => cloudUpdater.getState())
+  ipcMain.handle('updater:check', (_e, opts?: { silent?: boolean }) => cloudUpdater.checkForUpdates(opts))
+  ipcMain.handle('updater:download', (_e, kind?: 'installer' | 'portable') => cloudUpdater.downloadUpdate(kind))
+  ipcMain.handle('updater:cancelDownload', () => cloudUpdater.cancelDownload())
+  ipcMain.handle('updater:install', () => cloudUpdater.installDownloadedUpdate())
+  ipcMain.handle('updater:openReleasesPage', () => cloudUpdater.openReleasesPage())
+
+  // ===================== Clipboard & Drag-Drop Multi-File Import =====================
+  ipcMain.handle('clipboard:inspect', () => inspectClipboard())
+
+  ipcMain.handle('clipboard:inspectPaths', (_e, paths: string[]) => inspectImportPaths(paths))
+
+  ipcMain.handle(
+    'clipboard:commitImport',
+    async (
+      _e,
+      opts: {
+        targetGroupId?: number | null
+        filePaths?: string[]
+        resolutions?: Record<string, 'replace' | 'skip' | 'keep_both'>
+      }
+    ) => {
+      const res = await commitClipboardImport(opts)
+      if (res.ok) {
+        broadcast('event:assets-changed')
+      }
+      return res
     }
-    return res
-  })
+  )
 
   ipcMain.handle('clipboard:getStats', () => getClipboardStats())
 

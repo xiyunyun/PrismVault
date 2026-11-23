@@ -65,11 +65,20 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
     sources,
     stats,
     scanProgress,
+    updateState,
     openSettings,
     refreshAll,
     showToast,
     confirm
   } = useLibraryStore()
+
+  const hasPendingUpdate = Boolean(
+    updateState &&
+      updateState.release &&
+      (updateState.status === 'available' ||
+        updateState.status === 'downloading' ||
+        updateState.status === 'downloaded')
+  )
 
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(new Set())
   const [dragOverGroupId, setDragOverGroupId] = useState<number | null>(null)
@@ -536,8 +545,17 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
           className="w-full h-9 px-3 rounded-md flex items-center gap-2.5 text-sm font-medium hover:bg-[var(--bg-hover)] cursor-pointer transition-colors"
           style={{ color: 'var(--text-secondary)' }}
         >
-          <Settings className="w-4 h-4" />
-          <span>设置与索引管理</span>
+          <Settings className="w-4 h-4 shrink-0" />
+          <span className="flex-1 text-left truncate">设置与索引管理</span>
+          {hasPendingUpdate && (
+            <span
+              className="w-2 h-2 rounded-full shrink-0"
+              style={{
+                backgroundColor: updateState?.status === 'downloaded' ? 'var(--success)' : 'var(--accent)'
+              }}
+              title={`发现新版本 v${updateState?.release?.version}`}
+            />
+          )}
         </button>
       </div>
 

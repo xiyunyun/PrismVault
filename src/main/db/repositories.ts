@@ -34,8 +34,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
   ffmpegPath: '',
   thumbCacheDir: '',
   clipboardDir: '',
+  clipboardMaxFiles: 10,
+  clipboardMaxSizeMB: 30,
+  previewWheelMode: 'zoom',
   includeOtherFiles: false,
-  autoScanOnStartup: false
+  autoScanOnStartup: false,
+  autoCheckUpdates: true,
+  updateMirrorUrl: ''
 }
 
 const naturalCollator = new Intl.Collator('zh-CN', {

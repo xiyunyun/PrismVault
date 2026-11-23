@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { XiyunApi } from '@shared/types'
 
 const api: XiyunApi = {
@@ -45,10 +45,22 @@ const api: XiyunApi = {
     openExternal: (filePath) => ipcRenderer.invoke('system:openExternal', filePath),
     openExternalUrl: (url) => ipcRenderer.invoke('system:openExternalUrl', url),
     copyPath: (filePath) => ipcRenderer.invoke('system:copyPath', filePath),
-    checkFfmpeg: () => ipcRenderer.invoke('system:checkFfmpeg')
+    checkFfmpeg: () => ipcRenderer.invoke('system:checkFfmpeg'),
+    getPathForFile: (file) => webUtils.getPathForFile(file),
+    getAppInfo: () => ipcRenderer.invoke('system:getAppInfo')
+  },
+  updater: {
+    getState: () => ipcRenderer.invoke('updater:getState'),
+    check: (opts) => ipcRenderer.invoke('updater:check', opts),
+    download: (kind) => ipcRenderer.invoke('updater:download', kind),
+    cancelDownload: () => ipcRenderer.invoke('updater:cancelDownload'),
+    install: () => ipcRenderer.invoke('updater:install'),
+    openReleasesPage: () => ipcRenderer.invoke('updater:openReleasesPage')
   },
   clipboard: {
-    pasteImage: (targetGroupId) => ipcRenderer.invoke('clipboard:pasteImage', targetGroupId),
+    inspect: () => ipcRenderer.invoke('clipboard:inspect'),
+    inspectPaths: (paths) => ipcRenderer.invoke('clipboard:inspectPaths', paths),
+    commitImport: (opts) => ipcRenderer.invoke('clipboard:commitImport', opts),
     getStats: () => ipcRenderer.invoke('clipboard:getStats'),
     pickAndMoveDir: () => ipcRenderer.invoke('clipboard:pickAndMoveDir'),
     resetDir: () => ipcRenderer.invoke('clipboard:resetDir')
@@ -78,6 +90,11 @@ const api: XiyunApi = {
       const listener = (_e: Electron.IpcRendererEvent, progress: Parameters<typeof cb>[0]) => cb(progress)
       ipcRenderer.on('event:eagle-progress', listener)
       return () => ipcRenderer.removeListener('event:eagle-progress', listener)
+    },
+    onUpdateState: (cb) => {
+      const listener = (_e: Electron.IpcRendererEvent, state: Parameters<typeof cb>[0]) => cb(state)
+      ipcRenderer.on('event:update-state', listener)
+      return () => ipcRenderer.removeListener('event:update-state', listener)
     }
   }
 }

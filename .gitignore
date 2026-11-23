@@ -5,3 +5,4 @@ dist
 *.log
 *.tsbuildinfo
 .vite
+PROJECT_MEMORY.md

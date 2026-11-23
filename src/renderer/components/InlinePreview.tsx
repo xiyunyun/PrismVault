@@ -14,6 +14,7 @@ import {
   FolderOpen,
   Maximize2,
   Music,
+  RotateCcw,
   RotateCw,
   ZoomIn,
   ZoomOut
@@ -31,30 +32,42 @@ import type { Asset, TextContentResult } from '@shared/types'
 
 const ZOOM_STEPS = [0.25, 0.35, 0.5, 0.67, 0.8, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5]
 const DBLCLICK_ZOOM_SCALE = 2.25
+const EDGE_ZONE_PX = 110
+const EDGE_FADE_DELAY_MS = 2000
+const WHEEL_NAV_THROTTLE_MS = 140
 
 interface TransformState {
   scale: number
   x: number
   y: number
-  rotation: number
+  rotation: number // Unbounded cumulative angle (no % 360!) so every ±90° turn animates smoothly in the exact direction
+}
+
+interface ImageControlHandle {
+  zoomStep: (dir: 1 | -1) => void
+  resetFit: () => void
+  rotateCw: () => void
+  rotateCcw: () => void
 }
 
 // ===================== High-Performance GPU Image Stage =====================
 const ImageStage: React.FC<{
   asset: Asset
   fileUrl: string
-  zoomDisplay: number
+  wheelMode: 'zoom' | 'navigate'
+  onNavigateWheel: (dir: -1 | 1) => void
   onZoomDisplayChange: (scale: number) => void
-  controlRef: React.MutableRefObject<{
-    zoomStep: (dir: 1 | -1) => void
-    resetFit: () => void
-    rotate90: () => void
-  } | null>
-}> = ({ asset, fileUrl, onZoomDisplayChange, controlRef }) => {
+  controlRef: React.MutableRefObject<ImageControlHandle | null>
+}> = ({ asset, fileUrl, wheelMode, onNavigateWheel, onZoomDisplayChange, controlRef }) => {
   const stageRef = useRef<HTMLDivElement>(null)
   const imgRef = useRef<HTMLImageElement>(null)
   const tfRef = useRef<TransformState>({ scale: 1, x: 0, y: 0, rotation: 0 })
   const rafRef = useRef<number | null>(null)
+  const wheelModeRef = useRef(wheelMode)
+  const onNavRef = useRef(onNavigateWheel)
+  wheelModeRef.current = wheelMode
+  onNavRef.current = onNavigateWheel
+
   const dragRef = useRef<{
     active: boolean
     pointerId: number
@@ -91,7 +104,6 @@ const ImageStage: React.FC<{
     [applyTransform]
   )
 
-  // Reset when switching images
   useEffect(() => {
     tfRef.current = { scale: 1, x: 0, y: 0, rotation: 0 }
     applyTransform(false)
@@ -148,9 +160,15 @@ const ImageStage: React.FC<{
     applyTransform(true)
   }, [applyTransform])
 
-  const rotate90 = useCallback(() => {
+  const rotateCw = useCallback(() => {
     const cur = tfRef.current
-    tfRef.current = { ...cur, rotation: (cur.rotation + 90) % 360 }
+    tfRef.current = { ...cur, rotation: cur.rotation + 90 }
+    applyTransform(true)
+  }, [applyTransform])
+
+  const rotateCcw = useCallback(() => {
+    const cur = tfRef.current
+    tfRef.current = { ...cur, rotation: cur.rotation - 90 }
     applyTransform(true)
   }, [applyTransform])
 
@@ -158,22 +176,30 @@ const ImageStage: React.FC<{
     controlRef.current = {
       zoomStep: (dir) => stepScale(dir, undefined, undefined, true),
       resetFit,
-      rotate90
+      rotateCw,
+      rotateCcw
     }
     return () => {
       controlRef.current = null
     }
-  }, [controlRef, stepScale, resetFit, rotate90])
+  }, [controlRef, stepScale, resetFit, rotateCw, rotateCcw])
 
-  // Non-passive wheel listener for responsive, stepped cursor-anchored zoom
+  // Non-passive wheel listener supporting XOR swap between Zoom and Prev/Next navigation via Ctrl
   useEffect(() => {
     const el = stageRef.current
     if (!el) return
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
       if (e.deltaY === 0) return
-      const dir: 1 | -1 = e.deltaY < 0 ? 1 : -1
-      stepScale(dir, e.clientX, e.clientY, false)
+      const ctrlHeld = e.ctrlKey || e.metaKey
+      const shouldZoom = (wheelModeRef.current === 'zoom') !== ctrlHeld
+      if (shouldZoom) {
+        const dir: 1 | -1 = e.deltaY < 0 ? 1 : -1
+        stepScale(dir, e.clientX, e.clientY, false)
+      } else {
+        const navDir: -1 | 1 = e.deltaY < 0 ? -1 : 1
+        onNavRef.current(navDir)
+      }
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
@@ -184,7 +210,6 @@ const ImageStage: React.FC<{
     const isStandardFit = Math.abs(cur.scale - 1) < 0.02 && Math.abs(cur.x) < 2 && Math.abs(cur.y) < 2
 
     if (isStandardFit) {
-      // Local zoom centered around where the user double-clicked
       const rect = stageRef.current?.getBoundingClientRect()
       let nextX = 0
       let nextY = 0
@@ -197,7 +222,6 @@ const ImageStage: React.FC<{
       tfRef.current = { ...cur, scale: DBLCLICK_ZOOM_SCALE, x: nextX, y: nextY }
       applyTransform(true)
     } else {
-      // From ANY non-standard zoom level, double-click smoothly restores fit-to-screen
       tfRef.current = { ...cur, scale: 1, x: 0, y: 0 }
       applyTransform(true)
     }
@@ -237,6 +261,11 @@ const ImageStage: React.FC<{
     }
   }
 
+  const wheelHint =
+    wheelMode === 'zoom'
+      ? '滚轮分级缩放；Ctrl+滚轮 切换上下张；双击局部放大/还原；放大后拖拽平移'
+      : '滚轮切换上下张；Ctrl+滚轮 分级缩放；双击局部放大/还原；放大后拖拽平移'
+
   return (
     <div
       ref={stageRef}
@@ -250,7 +279,7 @@ const ImageStage: React.FC<{
         cursor: canPan ? (isDragging ? 'grabbing' : 'grab') : 'zoom-in',
         touchAction: 'none'
       }}
-      title="双击局部放大 / 再次双击还原适应屏幕；滚轮分级缩放；放大后可自由拖拽"
+      title={wheelHint}
     >
       <img
         ref={imgRef}
@@ -270,7 +299,7 @@ const ImageStage: React.FC<{
 
 // ===================== Main Integrated Inline Preview Pane =====================
 export const InlinePreview: React.FC = () => {
-  const { assets, previewAssetId, setPreviewAssetId, selectAsset, showToast } = useLibraryStore()
+  const { assets, settings, previewAssetId, setPreviewAssetId, selectAsset, showToast } = useLibraryStore()
 
   const currentIndex = useMemo(
     () => (previewAssetId != null ? assets.findIndex((a) => a.id === previewAssetId) : -1),
@@ -278,17 +307,85 @@ export const InlinePreview: React.FC = () => {
   )
   const asset = currentIndex >= 0 ? assets[currentIndex] : null
 
-  const imageControlRef = useRef<{
-    zoomStep: (dir: 1 | -1) => void
-    resetFit: () => void
-    rotate90: () => void
-  } | null>(null)
+  const imageControlRef = useRef<ImageControlHandle | null>(null)
+  const stageContainerRef = useRef<HTMLDivElement>(null)
+  const lastWheelNavRef = useRef(0)
+
+  // Edge floating navigation buttons with 2-second auto-fade
+  const [showLeftEdge, setShowLeftEdge] = useState(false)
+  const [showRightEdge, setShowRightEdge] = useState(false)
+  const leftFadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const rightFadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const hoveringLeftBtnRef = useRef(false)
+  const hoveringRightBtnRef = useRef(false)
 
   const [zoomScale, setZoomScale] = useState(1)
   const [videoError, setVideoError] = useState(false)
   const [textData, setTextData] = useState<TextContentResult | null>(null)
   const [textLoading, setTextLoading] = useState(false)
   const [mdRenderMode, setMdRenderMode] = useState<'rendered' | 'raw'>('rendered')
+
+  useEffect(() => {
+    return () => {
+      if (leftFadeTimerRef.current) clearTimeout(leftFadeTimerRef.current)
+      if (rightFadeTimerRef.current) clearTimeout(rightFadeTimerRef.current)
+    }
+  }, [])
+
+  const revealLeftEdge = useCallback(() => {
+    if (leftFadeTimerRef.current) {
+      clearTimeout(leftFadeTimerRef.current)
+      leftFadeTimerRef.current = null
+    }
+    setShowLeftEdge(true)
+  }, [])
+
+  const scheduleHideLeftEdge = useCallback(() => {
+    if (hoveringLeftBtnRef.current) return
+    if (leftFadeTimerRef.current) return
+    leftFadeTimerRef.current = setTimeout(() => {
+      leftFadeTimerRef.current = null
+      if (!hoveringLeftBtnRef.current) setShowLeftEdge(false)
+    }, EDGE_FADE_DELAY_MS)
+  }, [])
+
+  const revealRightEdge = useCallback(() => {
+    if (rightFadeTimerRef.current) {
+      clearTimeout(rightFadeTimerRef.current)
+      rightFadeTimerRef.current = null
+    }
+    setShowRightEdge(true)
+  }, [])
+
+  const scheduleHideRightEdge = useCallback(() => {
+    if (hoveringRightBtnRef.current) return
+    if (rightFadeTimerRef.current) return
+    rightFadeTimerRef.current = setTimeout(() => {
+      rightFadeTimerRef.current = null
+      if (!hoveringRightBtnRef.current) setShowRightEdge(false)
+    }, EDGE_FADE_DELAY_MS)
+  }, [])
+
+  const handleStageMouseMove = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const rect = e.currentTarget.getBoundingClientRect()
+      const relX = e.clientX - rect.left
+      const nearLeft = relX <= EDGE_ZONE_PX
+      const nearRight = rect.width - relX <= EDGE_ZONE_PX
+
+      if (nearLeft) revealLeftEdge()
+      else if (showLeftEdge) scheduleHideLeftEdge()
+
+      if (nearRight) revealRightEdge()
+      else if (showRightEdge) scheduleHideRightEdge()
+    },
+    [revealLeftEdge, scheduleHideLeftEdge, revealRightEdge, scheduleHideRightEdge, showLeftEdge, showRightEdge]
+  )
+
+  const handleStageMouseLeave = useCallback(() => {
+    if (showLeftEdge) scheduleHideLeftEdge()
+    if (showRightEdge) scheduleHideRightEdge()
+  }, [showLeftEdge, showRightEdge, scheduleHideLeftEdge, scheduleHideRightEdge])
 
   useEffect(() => {
     setZoomScale(1)
@@ -322,6 +419,40 @@ export const InlinePreview: React.FC = () => {
     }
   }, [assets, currentIndex, selectAsset, setPreviewAssetId])
 
+  const handleThrottledWheelNavigate = useCallback(
+    (dir: -1 | 1) => {
+      const now = Date.now()
+      if (now - lastWheelNavRef.current < WHEEL_NAV_THROTTLE_MS) return
+      lastWheelNavRef.current = now
+      if (dir < 0) goPrev()
+      else goNext()
+    },
+    [goPrev, goNext]
+  )
+
+  // Wheel navigation for non-image media types (video/audio/other respect wheelMode XOR Ctrl; text respects Ctrl+wheel so normal scroll works)
+  useEffect(() => {
+    const el = stageContainerRef.current
+    if (!el || !asset || asset.mediaType === 'image') return
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY === 0) return
+      const ctrlHeld = e.ctrlKey || e.metaKey
+      if (asset.mediaType === 'text') {
+        if (!ctrlHeld) return // Let user scroll text/markdown naturally
+        e.preventDefault()
+        handleThrottledWheelNavigate(e.deltaY < 0 ? -1 : 1)
+        return
+      }
+      const shouldNavigate = (settings.previewWheelMode === 'navigate') !== ctrlHeld
+      if (shouldNavigate) {
+        e.preventDefault()
+        handleThrottledWheelNavigate(e.deltaY < 0 ? -1 : 1)
+      }
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [asset, settings.previewWheelMode, handleThrottledWheelNavigate])
+
   useEffect(() => {
     if (!asset) return
     const onKeyDown = (e: KeyboardEvent) => {
@@ -354,6 +485,8 @@ export const InlinePreview: React.FC = () => {
   const fileUrl = getFileMediaUrl(asset.id)
   const thumbUrl = getThumbMediaUrl(asset.thumbPath)
   const isFitScale = Math.abs(zoomScale - 1) < 0.02
+  const hasPrev = currentIndex > 0
+  const hasNext = currentIndex < assets.length - 1
 
   const renderInlineContent = () => {
     if (asset.mediaType === 'image') {
@@ -361,7 +494,8 @@ export const InlinePreview: React.FC = () => {
         <ImageStage
           asset={asset}
           fileUrl={fileUrl}
-          zoomDisplay={zoomScale}
+          wheelMode={settings.previewWheelMode}
+          onNavigateWheel={handleThrottledWheelNavigate}
           onZoomDisplayChange={setZoomScale}
           controlRef={imageControlRef}
         />
@@ -551,7 +685,7 @@ export const InlinePreview: React.FC = () => {
           >
             <button
               type="button"
-              disabled={currentIndex <= 0}
+              disabled={!hasPrev}
               onClick={goPrev}
               className="h-8 w-8 flex items-center justify-center hover:bg-[var(--bg-hover)] disabled:opacity-35 cursor-pointer"
               title="上一个 (←)"
@@ -566,7 +700,7 @@ export const InlinePreview: React.FC = () => {
             </span>
             <button
               type="button"
-              disabled={currentIndex >= assets.length - 1}
+              disabled={!hasNext}
               onClick={goNext}
               className="h-8 w-8 flex items-center justify-center hover:bg-[var(--bg-hover)] disabled:opacity-35 cursor-pointer"
               title="下一个 (→)"
@@ -624,9 +758,18 @@ export const InlinePreview: React.FC = () => {
               >
                 <Maximize2 className="w-3.5 h-3.5" />
               </button>
+              <div className="w-px h-4 mx-0.5" style={{ backgroundColor: 'var(--border-subtle)' }} />
               <button
                 type="button"
-                onClick={() => imageControlRef.current?.rotate90()}
+                onClick={() => imageControlRef.current?.rotateCcw()}
+                className="h-7 w-7 rounded flex items-center justify-center hover:bg-[var(--bg-hover)] cursor-pointer"
+                title="逆时针旋转 90°"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => imageControlRef.current?.rotateCw()}
                 className="h-7 w-7 rounded flex items-center justify-center hover:bg-[var(--bg-hover)] cursor-pointer"
                 title="顺时针旋转 90°"
               >
@@ -706,8 +849,85 @@ export const InlinePreview: React.FC = () => {
         </div>
       </div>
 
-      {/* Inline Media Stage */}
-      <div className="flex-1 min-h-0 relative overflow-hidden">{renderInlineContent()}</div>
+      {/* Inline Media Stage with Edge Auto-Fade Prev/Next Floating Controls */}
+      <div
+        ref={stageContainerRef}
+        onMouseMove={handleStageMouseMove}
+        onMouseLeave={handleStageMouseLeave}
+        className="flex-1 min-h-0 relative overflow-hidden"
+      >
+        {renderInlineContent()}
+
+        {/* Edge Hover Sensor Strips (ensures edge detection works even over PDF iframes) */}
+        {hasPrev && (
+          <div
+            onMouseEnter={revealLeftEdge}
+            onMouseLeave={scheduleHideLeftEdge}
+            className="absolute left-0 top-12 bottom-12 w-6 z-20"
+          />
+        )}
+        {hasNext && (
+          <div
+            onMouseEnter={revealRightEdge}
+            onMouseLeave={scheduleHideRightEdge}
+            className="absolute right-0 top-12 bottom-12 w-6 z-20"
+          />
+        )}
+
+        {/* Left Edge Floating Previous Button (fades smoothly after 2s away from edge) */}
+        {hasPrev && (
+          <button
+            type="button"
+            onClick={goPrev}
+            onMouseEnter={() => {
+              hoveringLeftBtnRef.current = true
+              revealLeftEdge()
+            }}
+            onMouseLeave={() => {
+              hoveringLeftBtnRef.current = false
+              scheduleHideLeftEdge()
+            }}
+            className={`absolute left-4 top-1/2 -translate-y-1/2 z-30 w-11 h-20 rounded-xl border shadow-xl backdrop-blur-md flex items-center justify-center cursor-pointer transition-all duration-500 hover:scale-105 ${
+              showLeftEdge ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+            }`}
+            style={{
+              backgroundColor: 'rgba(28, 28, 32, 0.72)',
+              borderColor: 'rgba(255, 255, 255, 0.16)',
+              color: '#ffffff'
+            }}
+            title="上一个文件 (←)"
+          >
+            <ChevronLeft className="w-6 h-6" />
+          </button>
+        )}
+
+        {/* Right Edge Floating Next Button (fades smoothly after 2s away from edge) */}
+        {hasNext && (
+          <button
+            type="button"
+            onClick={goNext}
+            onMouseEnter={() => {
+              hoveringRightBtnRef.current = true
+              revealRightEdge()
+            }}
+            onMouseLeave={() => {
+              hoveringRightBtnRef.current = false
+              scheduleHideRightEdge()
+            }}
+            className={`absolute right-4 top-1/2 -translate-y-1/2 z-30 w-11 h-20 rounded-xl border shadow-xl backdrop-blur-md flex items-center justify-center cursor-pointer transition-all duration-500 hover:scale-105 ${
+              showRightEdge ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+            }`}
+            style={{
+              backgroundColor: 'rgba(28, 28, 32, 0.72)',
+              borderColor: 'rgba(255, 255, 255, 0.16)',
+              color: '#ffffff'
+            }}
+            title="下一个文件 (→)"
+          >
+            <ChevronRight className="w-6 h-6" />
+          </button>
+        )}
+      </div>
     </div>
   )
 }

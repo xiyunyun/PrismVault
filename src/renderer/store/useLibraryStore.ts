@@ -1,15 +1,19 @@
 import { create } from 'zustand'
 import type {
+  AppInfo,
   AppSettings,
   Asset,
   AssetQueryFilter,
+  ConflictResolution,
   GroupNode,
+  ImportConflictItem,
   LibraryStats,
   ScanProgress,
   SmartView,
   SortField,
   SortOrder,
-  SourceRoot
+  SourceRoot,
+  UpdateState
 } from '@shared/types'
 import type { MediaType } from '@shared/mediaTypes'
 import { applyTypographyToDocument } from '../utils/fonts'
@@ -25,8 +29,13 @@ const DEFAULT_SETTINGS: AppSettings = {
   ffmpegPath: '',
   thumbCacheDir: '',
   clipboardDir: '',
+  clipboardMaxFiles: 10,
+  clipboardMaxSizeMB: 30,
+  previewWheelMode: 'zoom',
   includeOtherFiles: false,
-  autoScanOnStartup: false
+  autoScanOnStartup: false,
+  autoCheckUpdates: true,
+  updateMirrorUrl: ''
 }
 
 export interface ConfirmDialogOptions {
@@ -40,6 +49,11 @@ export interface ConfirmDialogOptions {
 
 interface ConfirmDialogState extends ConfirmDialogOptions {
   resolve: (accepted: boolean) => void
+}
+
+interface ImportConflictDialogState {
+  conflicts: ImportConflictItem[]
+  resolve: (resolutions: Record<string, ConflictResolution> | null) => void
 }
 
 const EMPTY_STATS: LibraryStats = {
@@ -81,15 +95,20 @@ interface LibraryState {
   lastClickedId: number | null
   previewAssetId: number | null
   settingsOpen: boolean
-  settingsInitialTab: 'sources' | 'media' | 'appearance' | 'about'
+  settingsInitialTab: 'sources' | 'media' | 'controls' | 'appearance' | 'about'
   leftPanelOpen: boolean
   rightPanelOpen: boolean
   scanProgress: ScanProgress
   toast: ToastMessage | null
   confirmDialog: ConfirmDialogState | null
+  importConflictDialog: ImportConflictDialogState | null
 
   // Inline quick audio playback state
   playingAudioId: number | null
+
+  // App metadata & Cloud Updater state
+  appInfo: AppInfo | null
+  updateState: UpdateState | null
 
   // Actions
   init: () => Promise<void>
@@ -114,18 +133,21 @@ interface LibraryState {
   clearSelection: () => void
 
   setPreviewAssetId: (id: number | null) => void
-  openSettings: (tab?: 'sources' | 'media' | 'appearance' | 'about') => void
+  openSettings: (tab?: 'sources' | 'media' | 'controls' | 'appearance' | 'about') => void
   closeSettings: () => void
   toggleLeftPanel: () => void
   toggleRightPanel: () => void
 
   setScanProgress: (progress: ScanProgress) => void
+  setUpdateState: (state: UpdateState) => void
   patchThumbReady: (payload: { assetId: number; thumbPath: string; width?: number | null; height?: number | null }) => void
   updateAssetNoteLocal: (id: number, note: string) => void
   setPlayingAudioId: (id: number | null) => void
   showToast: (text: string, tone?: 'info' | 'success' | 'error') => void
   confirm: (options: ConfirmDialogOptions) => Promise<boolean>
   resolveConfirm: (accepted: boolean) => void
+  resolveImportConflicts: (conflicts: ImportConflictItem[]) => Promise<Record<string, ConflictResolution> | null>
+  finishImportConflicts: (resolutions: Record<string, ConflictResolution> | null) => void
 }
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null
@@ -172,13 +194,20 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   scanProgress: { running: false, scanned: 0, added: 0, updated: 0, relinked: 0, missing: 0 },
   toast: null,
   confirmDialog: null,
+  importConflictDialog: null,
   playingAudioId: null,
+  appInfo: null,
+  updateState: null,
 
   init: async () => {
-    const settings = await window.api.settings.getAll()
+    const [settings, appInfo, updateState] = await Promise.all([
+      window.api.settings.getAll(),
+      window.api.system.getAppInfo(),
+      window.api.updater.getState()
+    ])
     document.documentElement.setAttribute('data-theme', settings.theme)
     applyTypographyToDocument(settings.fontFamily, settings.fontSize)
-    set({ settings, initialized: true })
+    set({ settings, appInfo, updateState, initialized: true })
     await get().refreshAll()
   },
 
@@ -334,6 +363,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   toggleRightPanel: () => set((state) => ({ rightPanelOpen: !state.rightPanelOpen })),
 
   setScanProgress: (scanProgress) => set({ scanProgress }),
+  setUpdateState: (updateState) => set({ updateState }),
 
   patchThumbReady: (payload) => {
     set((state) => ({
@@ -380,6 +410,22 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     if (cur) {
       set({ confirmDialog: null })
       cur.resolve(accepted)
+    }
+  },
+
+  resolveImportConflicts: (conflicts) => {
+    return new Promise<Record<string, ConflictResolution> | null>((resolve) => {
+      const existing = get().importConflictDialog
+      if (existing) existing.resolve(null)
+      set({ importConflictDialog: { conflicts, resolve } })
+    })
+  },
+
+  finishImportConflicts: (resolutions) => {
+    const cur = get().importConflictDialog
+    if (cur) {
+      set({ importConflictDialog: null })
+      cur.resolve(resolutions)
     }
   }
 }))

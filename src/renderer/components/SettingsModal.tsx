@@ -1,7 +1,12 @@
 import React, { useEffect, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
+  AlertCircle,
+  ArrowUpCircle,
   CheckCircle2,
   ClipboardPaste,
+  CloudDownload,
   Database,
   Download,
   ExternalLink,
@@ -9,10 +14,13 @@ import {
   FolderOpen,
   FolderPlus,
   Github,
+  Globe,
   HardDrive,
   Heart,
   Info,
   Moon,
+  Mouse,
+  PackageCheck,
   Palette,
   RefreshCw,
   RotateCcw,
@@ -60,20 +68,39 @@ export const SettingsModal: React.FC = () => {
     settings,
     updateSettings,
     sources,
+    appInfo,
+    updateState,
+    setUpdateState,
     refreshAll,
     showToast,
     confirm
   } = useLibraryStore()
 
-  const [tab, setTab] = useState<'sources' | 'media' | 'appearance' | 'about'>('sources')
+  const [tab, setTab] = useState<'sources' | 'media' | 'controls' | 'appearance' | 'about'>('sources')
   const [cacheStats, setCacheStats] = useState<CacheStats | null>(null)
   const [clipboardStats, setClipboardStats] = useState<ClipboardStats | null>(null)
   const [ffmpegStatus, setFfmpegStatus] = useState<FfmpegStatus | null>(null)
   const [editingIgnoreId, setEditingIgnoreId] = useState<number | null>(null)
   const [ignoreDraft, setIgnoreDraft] = useState('')
   const [customFontDraft, setCustomFontDraft] = useState('')
+  const [mirrorDraft, setMirrorDraft] = useState('')
   const [movingCache, setMovingCache] = useState(false)
   const [movingClipboard, setMovingClipboard] = useState(false)
+
+  const displayVersion = appInfo?.version || updateState?.currentVersion || '0.2.0'
+  const installTypeLabel =
+    (appInfo?.installType || updateState?.installType) === 'installer'
+      ? '安装版'
+      : (appInfo?.installType || updateState?.installType) === 'portable'
+        ? '绿色便携版'
+        : '开发模式'
+  const hasPendingUpdate = Boolean(
+    updateState &&
+      updateState.release &&
+      (updateState.status === 'available' ||
+        updateState.status === 'downloading' ||
+        updateState.status === 'downloaded')
+  )
 
   // Eagle migration wizard modal state
   const [eagleWizard, setEagleWizard] = useState<{
@@ -95,6 +122,7 @@ export const SettingsModal: React.FC = () => {
       setTab(settingsInitialTab)
       const isPreset = FONT_PRESETS.some((p) => p.id === settings.fontFamily)
       setCustomFontDraft(isPreset ? '' : settings.fontFamily)
+      setMirrorDraft(settings.updateMirrorUrl || '')
       loadSystemStats()
     }
   }, [settingsOpen, settingsInitialTab])
@@ -161,6 +189,62 @@ export const SettingsModal: React.FC = () => {
     }
   }
 
+    const handleCheckUpdates = async () => {
+    const next = await window.api.updater.check({ silent: false })
+    setUpdateState(next)
+    if (next.status === 'up-to-date') {
+      showToast(`当前已是最新版本 v${next.currentVersion}`, 'success')
+    } else if (next.status === 'available' && next.release) {
+      showToast(`发现新版本 v${next.release.version}`, 'info')
+    } else if (next.status === 'downloaded' && next.release) {
+      showToast(`新版本 v${next.release.version} 已下载就绪`, 'success')
+    } else if (next.status === 'error' && next.error) {
+      showToast(next.error, 'error')
+    }
+  }
+
+  const handleDownloadUpdate = async (kind?: 'installer' | 'portable') => {
+    const next = await window.api.updater.download(kind)
+    setUpdateState(next)
+    if (next.status === 'downloaded' && next.download) {
+      showToast(`更新包 ${next.download.fileName} 下载完成`, 'success')
+    } else if (next.status === 'error' && next.error) {
+      showToast(next.error, 'error')
+    }
+  }
+
+  const handleInstallUpdate = async () => {
+    if (!updateState?.download) return
+    const isInstaller = updateState.download.kind === 'installer'
+    if (isInstaller) {
+      const ok = await confirm({
+        title: `安装 PrismVault v${updateState.release?.version || ''}`,
+        message: '将关闭当前 PrismVault 并启动新版安装向导，是否立即继续？',
+        detail: '你的所有索引源配置、自定义分组、Markdown 备注与原始素材文件均保存在独立位置，覆盖安装不会丢失任何数据。',
+        confirmText: '立即退出并安装',
+        variant: 'info'
+      })
+      if (!ok) return
+    }
+
+    const res = await window.api.updater.install()
+    if (!res.ok) {
+      showToast(res.error || '启动更新失败', 'error')
+    } else if (res.action === 'revealed-portable') {
+      showToast('已在资源管理器中定位便携版更新包，解压替换目录即可完成升级', 'success')
+    }
+  }
+
+  const handleSaveMirror = async () => {
+    const trimmed = mirrorDraft.trim()
+    if (trimmed && !/^https?:\/\//i.test(trimmed)) {
+      showToast('加速镜像前缀必须以 https:// 或 http:// 开头', 'error')
+      return
+    }
+    await updateSettings({ updateMirrorUrl: trimmed })
+    showToast(trimmed ? '已保存下载加速镜像前缀' : '已切换为直连 GitHub 下载', 'success')
+  }
+
   if (!settingsOpen) return null
 
   return (
@@ -187,6 +271,7 @@ export const SettingsModal: React.FC = () => {
           {[
             { id: 'sources' as const, label: '索引目录源', icon: HardDrive },
             { id: 'media' as const, label: '媒体与缓存', icon: Database },
+            { id: 'controls' as const, label: '操作与交互', icon: Mouse },
             { id: 'appearance' as const, label: '外观与字体', icon: Palette },
             { id: 'about' as const, label: '关于 PrismVault', icon: Info }
           ].map((item) => {
@@ -209,8 +294,16 @@ export const SettingsModal: React.FC = () => {
                     style={{ backgroundColor: 'var(--accent)' }}
                   />
                 )}
-                <Icon className="w-4 h-4" style={{ color: active ? 'var(--accent)' : 'var(--text-muted)' }} />
-                <span>{item.label}</span>
+                <Icon className="w-4 h-4 shrink-0" style={{ color: active ? 'var(--accent)' : 'var(--text-muted)' }} />
+                <span className="flex-1 text-left truncate">{item.label}</span>
+                {item.id === 'about' && hasPendingUpdate && (
+                  <span
+                    className="w-2 h-2 rounded-full shrink-0"
+                    style={{
+                      backgroundColor: updateState?.status === 'downloaded' ? 'var(--success)' : 'var(--accent)'
+                    }}
+                  />
+                )}
               </button>
             )
           })}
@@ -224,7 +317,8 @@ export const SettingsModal: React.FC = () => {
           >
             <h3 className="text-base font-semibold" style={{ color: 'var(--text-primary)' }}>
               {tab === 'sources' && '索引目录源管理（跨盘符零复制）'}
-              {tab === 'media' && '媒体解析引擎与缓存维护'}
+              {tab === 'media' && '媒体解析引擎与存储路径'}
+              {tab === 'controls' && '鼠标交互、导入提醒阈值与操作习惯'}
               {tab === 'appearance' && '外观主题、字体字号与高 DPI 适配'}
               {tab === 'about' && '关于 PrismVault · 棱镜匣'}
             </h3>
@@ -707,7 +801,7 @@ export const SettingsModal: React.FC = () => {
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2 text-sm font-semibold">
                       <ClipboardPaste className="w-4 h-4" style={{ color: 'var(--accent)' }} />
-                      <span>剪贴板图片导入目录（Ctrl + V）</span>
+                      <span>剪贴板与拖放导入存放目录</span>
                     </div>
                     {clipboardStats?.isCustom && (
                       <span
@@ -720,7 +814,7 @@ export const SettingsModal: React.FC = () => {
                   </div>
 
                   <p className="text-xs leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
-                    在软件置顶聚焦状态下按 <kbd className="px-1.5 py-0.5 rounded bg-black/20 font-mono">Ctrl + V</kbd> 可自动抓取剪贴板图片并保存到该独立目录；更改路径时会自动迁移全部已有文件并保持备注与分组无损。
+                    通过 <kbd className="px-1.5 py-0.5 rounded bg-black/20 font-mono">Ctrl + V</kbd> 剪贴板粘贴或直接向窗口拖放导入的文件将存放在该独立目录；更改路径时会自动迁移全部已有文件并保持备注与分组无损。
                   </p>
 
                   {clipboardStats && (
@@ -827,7 +921,160 @@ export const SettingsModal: React.FC = () => {
               </>
             )}
 
-            {/* ==================== TAB 3: Appearance & Typography ==================== */}
+            {/* ==================== TAB 3: Controls & Interaction ==================== */}
+            {tab === 'controls' && (
+              <div className="space-y-4">
+                {/* Preview Mouse Wheel Interaction Mode */}
+                <div
+                  className="rounded-lg border p-4 space-y-3"
+                  style={{ backgroundColor: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)' }}
+                >
+                  <div className="flex items-center gap-2 text-sm font-semibold">
+                    <Mouse className="w-4 h-4" style={{ color: 'var(--accent)' }} />
+                    <span>内嵌预览鼠标滚轮功能</span>
+                  </div>
+                  <p className="text-xs leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                    选择单图/文件内嵌预览时的默认滚轮操作；无论选择哪一种，按住 <kbd className="px-1.5 py-0.5 rounded bg-black/20 font-mono">Ctrl + 滚轮</kbd> 都会自动切换为另一种操作。
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    {(
+                      [
+                        {
+                          id: 'zoom' as const,
+                          title: '滚轮缩放画面（默认）',
+                          desc: '按住 Ctrl + 滚轮 → 切换上下文件'
+                        },
+                        {
+                          id: 'navigate' as const,
+                          title: '滚轮切换上下文件',
+                          desc: '按住 Ctrl + 滚轮 → 缩放图片画面'
+                        }
+                      ] as const
+                    ).map((opt) => {
+                      const active = settings.previewWheelMode === opt.id
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => updateSettings({ previewWheelMode: opt.id })}
+                          className="p-3 rounded-lg border text-left cursor-pointer transition-colors space-y-0.5"
+                          style={{
+                            backgroundColor: active ? 'var(--bg-active)' : 'var(--bg-surface)',
+                            borderColor: active ? 'var(--accent)' : 'var(--border-subtle)'
+                          }}
+                        >
+                          <div className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
+                            {opt.title}
+                          </div>
+                          <div className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                            {opt.desc}
+                          </div>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                {/* Batch Import Threshold Controls (Clipboard + Drag-and-Drop) */}
+                <div
+                  className="rounded-lg border p-4 space-y-3"
+                  style={{ backgroundColor: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)' }}
+                >
+                  <div className="flex items-center gap-2 text-sm font-semibold">
+                    <ClipboardPaste className="w-4 h-4" style={{ color: 'var(--accent)' }} />
+                    <span>单次批量导入提醒阈值（剪贴板与拖放通用）</span>
+                  </div>
+                  <p className="text-xs leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                    当通过 <kbd className="px-1.5 py-0.5 rounded bg-black/20 font-mono">Ctrl + V</kbd> 或拖放导入的文件总数或总大小超过以下阈值时，将弹出确认提醒；设为 <code className="font-mono">0</code> 表示不限制。导入同名文件时会自动弹出缩略图对比确认窗。
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <label
+                      className="space-y-1.5 p-3 rounded-lg border text-xs"
+                      style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
+                    >
+                      <span className="block font-medium" style={{ color: 'var(--text-primary)' }}>
+                        最大单次导入文件数量
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min={0}
+                          max={9999}
+                          value={settings.clipboardMaxFiles}
+                          onChange={(e) => {
+                            const val = Math.max(0, Math.floor(Number(e.target.value) || 0))
+                            updateSettings({ clipboardMaxFiles: val })
+                          }}
+                          className="w-24 h-8 px-2.5 rounded-md border text-xs font-mono outline-none select-text focus:border-[var(--accent)]"
+                          style={{
+                            backgroundColor: 'var(--bg-elevated)',
+                            borderColor: 'var(--border-subtle)',
+                            color: 'var(--text-primary)'
+                          }}
+                        />
+                        <span style={{ color: 'var(--text-muted)' }}>个文件</span>
+                      </div>
+                    </label>
+
+                    <label
+                      className="space-y-1.5 p-3 rounded-lg border text-xs"
+                      style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
+                    >
+                      <span className="block font-medium" style={{ color: 'var(--text-primary)' }}>
+                        最大单次导入总体积
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min={0}
+                          max={102400}
+                          value={settings.clipboardMaxSizeMB}
+                          onChange={(e) => {
+                            const val = Math.max(0, Math.floor(Number(e.target.value) || 0))
+                            updateSettings({ clipboardMaxSizeMB: val })
+                          }}
+                          className="w-24 h-8 px-2.5 rounded-md border text-xs font-mono outline-none select-text focus:border-[var(--accent)]"
+                          style={{
+                            backgroundColor: 'var(--bg-elevated)',
+                            borderColor: 'var(--border-subtle)',
+                            color: 'var(--text-primary)'
+                          }}
+                        />
+                        <span style={{ color: 'var(--text-muted)' }}>MB</span>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+
+                {/* Quick Interaction Reference */}
+                <div
+                  className="rounded-lg border p-4 space-y-2.5"
+                  style={{ backgroundColor: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)' }}
+                >
+                  <div className="text-sm font-semibold">快捷操作一览</div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs" style={{ color: 'var(--text-secondary)' }}>
+                    <div className="flex justify-between p-2 rounded bg-[var(--bg-surface)]">
+                      <span>外部文件导入</span>
+                      <kbd className="font-mono">拖放至窗口 / Ctrl + V</kbd>
+                    </div>
+                    <div className="flex justify-between p-2 rounded bg-[var(--bg-surface)]">
+                      <span>进入 / 退出内嵌预览</span>
+                      <kbd className="font-mono">双击 / Space / Esc</kbd>
+                    </div>
+                    <div className="flex justify-between p-2 rounded bg-[var(--bg-surface)]">
+                      <span>预览局部放大 / 还原</span>
+                      <kbd className="font-mono">双击图片 / 0</kbd>
+                    </div>
+                    <div className="flex justify-between p-2 rounded bg-[var(--bg-surface)]">
+                      <span>预览切换上下文件</span>
+                      <kbd className="font-mono">← / → / 边缘悬浮键</kbd>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ==================== TAB 4: Appearance & Typography ==================== */}
             {tab === 'appearance' && (
               <div className="space-y-4">
                 {/* Theme */}
@@ -1046,7 +1293,7 @@ export const SettingsModal: React.FC = () => {
               </div>
             )}
 
-            {/* ==================== TAB 4: About ==================== */}
+            {/* ==================== TAB 5: About & Cloud Updates ==================== */}
             {tab === 'about' && (
               <div className="space-y-4">
                 {/* Brand Hero */}
@@ -1064,7 +1311,13 @@ export const SettingsModal: React.FC = () => {
                         className="text-xs font-mono px-2 py-0.5 rounded-full"
                         style={{ backgroundColor: 'var(--bg-active)', color: 'var(--accent)' }}
                       >
-                        v0.1.0
+                        v{displayVersion}
+                      </span>
+                      <span
+                        className="text-xs px-2 py-0.5 rounded-full border"
+                        style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
+                      >
+                        {installTypeLabel}
                       </span>
                       <span
                         className="text-xs font-mono px-2 py-0.5 rounded-full border"
@@ -1076,6 +1329,436 @@ export const SettingsModal: React.FC = () => {
                     <p className="text-xs leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
                       面向创作者的跨盘符、零复制本地全媒体素材管理工具 —— 统一纳管图片（含 PSD/PSB/TIFF）、视频、音频、文本与文档，提供瀑布流 / 等比双视图、一体化内嵌预览、层级分组与 Markdown 备注。
                     </p>
+                  </div>
+                </div>
+
+                {/* Cloud Updater (GitHub Releases) */}
+                <div
+                  className="rounded-xl border p-4 space-y-3.5"
+                  style={{ backgroundColor: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)' }}
+                >
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2 text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                      <CloudDownload className="w-4 h-4" style={{ color: 'var(--accent)' }} />
+                      <span>软件云更新（GitHub Releases）</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => window.api.updater.openReleasesPage()}
+                        className="h-8 px-2.5 rounded-md border text-xs flex items-center gap-1.5 hover:bg-[var(--bg-hover)] cursor-pointer"
+                        style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
+                        title="在浏览器中打开 GitHub Releases 页面"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        <span>Releases 页面</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={updateState?.status === 'checking' || updateState?.status === 'downloading'}
+                        onClick={handleCheckUpdates}
+                        className="h-8 px-3.5 rounded-md text-xs font-medium text-white flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                        style={{ backgroundColor: 'var(--accent-solid)' }}
+                      >
+                        <RefreshCw
+                          className={`w-3.5 h-3.5 ${updateState?.status === 'checking' ? 'animate-spin' : ''}`}
+                        />
+                        <span>{updateState?.status === 'checking' ? '正在检查...' : '检查更新'}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Status Body */}
+                  {(!updateState || updateState.status === 'idle') && (
+                    <div
+                      className="rounded-lg border p-3 text-xs flex items-center justify-between gap-2"
+                      style={{
+                        backgroundColor: 'var(--bg-surface)',
+                        borderColor: 'var(--border-subtle)',
+                        color: 'var(--text-secondary)'
+                      }}
+                    >
+                      <span>当前版本 v{displayVersion}（{installTypeLabel}），点击右上角「检查更新」获取最新版本。</span>
+                    </div>
+                  )}
+
+                  {updateState?.status === 'checking' && (
+                    <div
+                      className="rounded-lg border p-3.5 text-xs flex items-center gap-2.5"
+                      style={{
+                        backgroundColor: 'var(--bg-surface)',
+                        borderColor: 'var(--border-subtle)',
+                        color: 'var(--text-secondary)'
+                      }}
+                    >
+                      <RefreshCw className="w-4 h-4 animate-spin shrink-0" style={{ color: 'var(--accent)' }} />
+                      <span>正在连接 GitHub 获取 PrismVault 最新 Release 信息...</span>
+                    </div>
+                  )}
+
+                  {updateState?.status === 'up-to-date' && (
+                    <div
+                      className="rounded-lg border p-3.5 text-xs flex items-center justify-between gap-2 flex-wrap"
+                      style={{
+                        backgroundColor: 'rgba(52, 211, 153, 0.08)',
+                        borderColor: 'rgba(52, 211, 153, 0.35)',
+                        color: 'var(--text-primary)'
+                      }}
+                    >
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="w-4 h-4 shrink-0" style={{ color: 'var(--success)' }} />
+                        <span>
+                          当前已是最新版本 <strong className="font-mono">v{displayVersion}</strong>
+                          {updateState.release ? `（云端最新 ${updateState.release.tagName}）` : ''}
+                        </span>
+                      </div>
+                      {updateState.checkedAt && (
+                        <span className="font-mono" style={{ color: 'var(--text-muted)' }}>
+                          检查于 {formatDateTime(updateState.checkedAt)}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {updateState?.status === 'error' && (
+                    <div
+                      className="rounded-lg border p-3.5 text-xs space-y-2"
+                      style={{
+                        backgroundColor: 'rgba(239, 68, 68, 0.08)',
+                        borderColor: 'rgba(239, 68, 68, 0.35)',
+                        color: 'var(--text-primary)'
+                      }}
+                    >
+                      <div className="flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" style={{ color: 'var(--danger)' }} />
+                        <div className="leading-relaxed">{updateState.error || '检查或下载更新时发生未知错误'}</div>
+                      </div>
+                      <div className="flex items-center gap-2 pl-6">
+                        <button
+                          type="button"
+                          onClick={handleCheckUpdates}
+                          className="h-7 px-3 rounded-md border text-xs hover:bg-[var(--bg-hover)] cursor-pointer"
+                          style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
+                        >
+                          重试检查
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => window.api.updater.openReleasesPage()}
+                          className="h-7 px-3 rounded-md border text-xs hover:bg-[var(--bg-hover)] cursor-pointer"
+                          style={{ borderColor: 'var(--border-subtle)', color: 'var(--accent)' }}
+                        >
+                          在浏览器中手动下载
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {updateState?.release &&
+                    (updateState.status === 'available' ||
+                      updateState.status === 'downloading' ||
+                      updateState.status === 'downloaded') && (
+                      <div
+                        className="rounded-lg border p-3.5 space-y-3"
+                        style={{
+                          backgroundColor: 'var(--bg-surface)',
+                          borderColor:
+                            updateState.status === 'downloaded' ? 'var(--success)' : 'var(--accent)'
+                        }}
+                      >
+                        <div className="flex items-start justify-between gap-2 flex-wrap">
+                          <div className="space-y-0.5">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <ArrowUpCircle
+                                className="w-4 h-4 shrink-0"
+                                style={{
+                                  color: updateState.status === 'downloaded' ? 'var(--success)' : 'var(--accent)'
+                                }}
+                              />
+                              <span className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                                {updateState.release.name || `PrismVault v${updateState.release.version}`}
+                              </span>
+                              <span
+                                className="text-xs font-mono px-2 py-0.5 rounded-full"
+                                style={{ backgroundColor: 'var(--bg-active)', color: 'var(--accent)' }}
+                              >
+                                v{displayVersion} → v{updateState.release.version}
+                              </span>
+                            </div>
+                            {updateState.release.publishedAt && (
+                              <div className="text-xs pl-6" style={{ color: 'var(--text-muted)' }}>
+                                发布于 {formatDateTime(new Date(updateState.release.publishedAt).getTime())}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Changelog Markdown */}
+                        {updateState.release.notes && (
+                          <div
+                            className="rounded-md border p-3 max-h-44 overflow-y-auto markdown-body text-xs"
+                            style={{
+                              backgroundColor: 'var(--bg-elevated)',
+                              borderColor: 'var(--border-subtle)'
+                            }}
+                          >
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              components={{
+                                a: ({ href, children }) => (
+                                  <a
+                                    href={href}
+                                    onClick={(e) => {
+                                      e.preventDefault()
+                                      if (href) window.api.system.openExternalUrl(href)
+                                    }}
+                                  >
+                                    {children}
+                                  </a>
+                                )
+                              }}
+                            >
+                              {updateState.release.notes}
+                            </ReactMarkdown>
+                          </div>
+                        )}
+
+                        {/* State: Available -> Download buttons */}
+                        {updateState.status === 'available' && (
+                          <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                            {updateState.release.recommendedAsset ? (
+                              <button
+                                type="button"
+                                onClick={() => handleDownloadUpdate(updateState.release!.recommendedAsset!.kind)}
+                                className="h-9 px-4 rounded-md text-xs font-medium text-white flex items-center gap-1.5 cursor-pointer"
+                                style={{ backgroundColor: 'var(--accent-solid)' }}
+                              >
+                                <Download className="w-4 h-4" />
+                                <span>
+                                  下载
+                                  {updateState.release.recommendedAsset.kind === 'installer' ? '安装版' : '便携版'}
+                                  {updateState.release.recommendedAsset.size > 0
+                                    ? ` (${formatFileSize(updateState.release.recommendedAsset.size)})`
+                                    : ''}
+                                </span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => window.api.updater.openReleasesPage()}
+                                className="h-9 px-4 rounded-md text-xs font-medium text-white flex items-center gap-1.5 cursor-pointer"
+                                style={{ backgroundColor: 'var(--accent-solid)' }}
+                              >
+                                <ExternalLink className="w-4 h-4" />
+                                <span>前往 GitHub Releases 下载</span>
+                              </button>
+                            )}
+
+                            {/* Offer alternative package format when both exist */}
+                            {updateState.release.installerAsset &&
+                              updateState.release.portableAsset &&
+                              updateState.release.recommendedAsset && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleDownloadUpdate(
+                                      updateState.release!.recommendedAsset!.kind === 'installer'
+                                        ? 'portable'
+                                        : 'installer'
+                                    )
+                                  }
+                                  className="h-9 px-3 rounded-md border text-xs flex items-center gap-1.5 hover:bg-[var(--bg-hover)] cursor-pointer"
+                                  style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
+                                >
+                                  <Download className="w-3.5 h-3.5" />
+                                  <span>
+                                    改下
+                                    {updateState.release.recommendedAsset.kind === 'installer'
+                                      ? `便携版 .zip (${formatFileSize(updateState.release.portableAsset.size)})`
+                                      : `安装版 .exe (${formatFileSize(updateState.release.installerAsset.size)})`}
+                                  </span>
+                                </button>
+                              )}
+
+                            <button
+                              type="button"
+                              onClick={() => window.api.updater.openReleasesPage()}
+                              className="h-9 px-3 rounded-md border text-xs flex items-center gap-1.5 hover:bg-[var(--bg-hover)] cursor-pointer"
+                              style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
+                            >
+                              <ExternalLink className="w-3.5 h-3.5" />
+                              <span>浏览器下载</span>
+                            </button>
+                          </div>
+                        )}
+
+                        {/* State: Downloading -> Progress bar + Cancel */}
+                        {updateState.status === 'downloading' && updateState.download && (
+                          <div className="space-y-2 pt-0.5">
+                            <div className="flex items-center justify-between gap-2 text-xs">
+                              <span className="font-mono truncate" style={{ color: 'var(--text-primary)' }}>
+                                正在下载 {updateState.download.fileName}
+                              </span>
+                              <span className="font-mono tabular-nums shrink-0" style={{ color: 'var(--accent)' }}>
+                                {updateState.download.percent}%
+                              </span>
+                            </div>
+                            <div
+                              className="w-full h-2.5 rounded-full overflow-hidden"
+                              style={{ backgroundColor: 'var(--bg-elevated)' }}
+                            >
+                              <div
+                                className="h-full transition-all duration-150 rounded-full"
+                                style={{
+                                  width: `${Math.max(2, Math.min(100, updateState.download.percent))}%`,
+                                  backgroundColor: 'var(--accent-solid)'
+                                }}
+                              />
+                            </div>
+                            <div className="flex items-center justify-between gap-2 text-xs">
+                              <span className="font-mono tabular-nums" style={{ color: 'var(--text-muted)' }}>
+                                {formatFileSize(updateState.download.transferredBytes)}
+                                {updateState.download.totalBytes > 0
+                                  ? ` / ${formatFileSize(updateState.download.totalBytes)}`
+                                  : ''}
+                                {updateState.download.bytesPerSecond > 0
+                                  ? ` · ${formatFileSize(updateState.download.bytesPerSecond)}/s`
+                                  : ''}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  const next = await window.api.updater.cancelDownload()
+                                  setUpdateState(next)
+                                  showToast('已取消下载更新')
+                                }}
+                                className="h-7 px-3 rounded-md border text-xs hover:bg-[var(--bg-hover)] cursor-pointer"
+                                style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
+                              >
+                                取消下载
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* State: Downloaded -> Launch Installer or Reveal Portable Zip */}
+                        {updateState.status === 'downloaded' && updateState.download && (
+                          <div className="space-y-2.5 pt-0.5">
+                            <div
+                              className="flex items-center gap-2 text-xs font-medium"
+                              style={{ color: 'var(--success)' }}
+                            >
+                              <PackageCheck className="w-4 h-4 shrink-0" />
+                              <span className="truncate">
+                                已下载就绪：{updateState.download.fileName}（
+                                {formatFileSize(updateState.download.totalBytes)}）
+                              </span>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={handleInstallUpdate}
+                                className="h-9 px-4 rounded-md text-xs font-medium text-white flex items-center gap-1.5 cursor-pointer"
+                                style={{ backgroundColor: 'var(--accent-solid)' }}
+                              >
+                                {updateState.download.kind === 'installer' ? (
+                                  <>
+                                    <ArrowUpCircle className="w-4 h-4" />
+                                    <span>立即退出并安装更新</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <FolderOpen className="w-4 h-4" />
+                                    <span>打开更新包所在目录</span>
+                                  </>
+                                )}
+                              </button>
+                              {updateState.download.kind === 'installer' && (
+                                <button
+                                  type="button"
+                                  onClick={() => window.api.system.revealInExplorer(updateState.download!.filePath)}
+                                  className="h-9 px-3 rounded-md border text-xs flex items-center gap-1.5 hover:bg-[var(--bg-hover)] cursor-pointer"
+                                  style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
+                                >
+                                  <FolderOpen className="w-3.5 h-3.5" />
+                                  <span>打开安装包位置</span>
+                                </button>
+                              )}
+                            </div>
+                            {updateState.download.kind === 'portable' && (
+                              <div className="text-xs leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                                便携版升级提示：请先关闭当前 PrismVault，将下载的压缩包解压并覆盖程序目录即可；索引数据库、分组与备注保存在系统用户目录中，升级不会丢失。
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                  {/* Update Settings: Auto Check & Optional Mirror */}
+                  <div
+                    className="pt-3 border-t space-y-3"
+                    style={{ borderColor: 'var(--border-subtle)' }}
+                  >
+                    <label className="flex items-center justify-between gap-3 text-xs cursor-pointer">
+                      <div>
+                        <div className="font-medium" style={{ color: 'var(--text-primary)' }}>
+                          启动应用时自动静默检查更新
+                        </div>
+                        <div className="mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                          发现新版本时在窗口顶栏轻提示，无新版本或离线时保持安静
+                        </div>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={settings.autoCheckUpdates}
+                        onChange={(e) => updateSettings({ autoCheckUpdates: e.target.checked })}
+                        className="accent-[var(--accent-solid)] w-4 h-4 cursor-pointer shrink-0"
+                      />
+                    </label>
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-1.5 text-xs font-medium" style={{ color: 'var(--text-primary)' }}>
+                        <Globe className="w-3.5 h-3.5" style={{ color: 'var(--accent)' }} />
+                        <span>GitHub 下载加速镜像前缀（可选，留空直连）</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={mirrorDraft}
+                          onChange={(e) => setMirrorDraft(e.target.value)}
+                          placeholder="留空则直连 GitHub（自动遵循系统代理）；可填如 https://ghfast.top/"
+                          className="flex-1 h-8 px-2.5 rounded-md border text-xs font-mono outline-none select-text focus:border-[var(--accent)]"
+                          style={{
+                            backgroundColor: 'var(--bg-surface)',
+                            borderColor: 'var(--border-subtle)',
+                            color: 'var(--text-primary)'
+                          }}
+                        />
+                        <button
+                          type="button"
+                          onClick={handleSaveMirror}
+                          className="h-8 px-3 rounded-md border text-xs font-medium hover:bg-[var(--bg-hover)] cursor-pointer shrink-0"
+                          style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-primary)' }}
+                        >
+                          保存
+                        </button>
+                        {(mirrorDraft || settings.updateMirrorUrl) && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              setMirrorDraft('')
+                              await updateSettings({ updateMirrorUrl: '' })
+                              showToast('已恢复直连 GitHub 下载')
+                            }}
+                            className="h-8 px-2.5 rounded-md text-xs hover:bg-[var(--bg-hover)] cursor-pointer shrink-0"
+                            style={{ color: 'var(--text-secondary)' }}
+                          >
+                            清空
+                          </button>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </div>
 

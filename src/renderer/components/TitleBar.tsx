@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import {
+  ArrowUpCircle,
+  Download,
   FolderPlus,
   Moon,
   PanelLeft,
@@ -19,6 +21,8 @@ export const TitleBar: React.FC = () => {
     settings,
     updateSettings,
     scanProgress,
+    updateState,
+    openSettings,
     leftPanelOpen,
     rightPanelOpen,
     toggleLeftPanel,
@@ -127,6 +131,44 @@ export const TitleBar: React.FC = () => {
 
       {/* Right: Quick actions + Right Inspector Toggle (leaving clean room for Win11 caption controls) */}
       <div className="app-no-drag flex items-center gap-1 shrink-0">
+        {updateState &&
+          updateState.release &&
+          (updateState.status === 'available' ||
+            updateState.status === 'downloading' ||
+            updateState.status === 'downloaded') && (
+            <button
+              type="button"
+              onClick={() => openSettings('about')}
+              className="h-7 px-2.5 mr-0.5 rounded-full border flex items-center gap-1.5 text-xs font-medium cursor-pointer transition-colors hover:brightness-110"
+              style={{
+                backgroundColor:
+                  updateState.status === 'downloaded' ? 'rgba(52, 211, 153, 0.14)' : 'var(--bg-active)',
+                borderColor: updateState.status === 'downloaded' ? 'var(--success)' : 'var(--accent)',
+                color: updateState.status === 'downloaded' ? 'var(--success)' : 'var(--accent)'
+              }}
+              title={
+                updateState.status === 'downloaded'
+                  ? `PrismVault v${updateState.release.version} 已下载就绪，点击前往安装`
+                  : updateState.status === 'downloading'
+                    ? `正在下载 PrismVault v${updateState.release.version} (${updateState.download?.percent ?? 0}%)`
+                    : `发现 PrismVault 新版本 v${updateState.release.version}，点击查看更新详情`
+              }
+            >
+              {updateState.status === 'downloading' ? (
+                <Download className="w-3.5 h-3.5 animate-pulse shrink-0" />
+              ) : (
+                <ArrowUpCircle className="w-3.5 h-3.5 shrink-0" />
+              )}
+              <span className="whitespace-nowrap">
+                {updateState.status === 'downloading'
+                  ? `更新 ${updateState.download?.percent ?? 0}%`
+                  : updateState.status === 'downloaded'
+                    ? `安装 v${updateState.release.version}`
+                    : `新版本 v${updateState.release.version}`}
+              </span>
+            </button>
+          )}
+
         <button
           type="button"
           onClick={handleAddSource}
