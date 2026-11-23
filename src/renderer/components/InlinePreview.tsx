@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
@@ -14,6 +15,7 @@ import {
   FolderOpen,
   Maximize2,
   Music,
+  RefreshCw,
   RotateCcw,
   RotateCw,
   ZoomIn,
@@ -24,17 +26,60 @@ import { getFileMediaUrl, getThumbMediaUrl } from '../utils/mediaUrl'
 import {
   formatDuration,
   formatFileSize,
+  is3DModelExt,
+  isCadExt,
   isMarkdownExt,
   isPdfExt,
   isReadableTextExt
 } from '@shared/mediaTypes'
 import type { Asset, TextContentResult } from '@shared/types'
 
+const Model3DPreview = React.lazy(() =>
+  import('./Model3DPreview').then((m) => ({ default: m.Model3DPreview }))
+)
+const CadPreview = React.lazy(() =>
+  import('./CadPreview').then((m) => ({ default: m.CadPreview }))
+)
+
 const ZOOM_STEPS = [0.25, 0.35, 0.5, 0.67, 0.8, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5]
 const DBLCLICK_ZOOM_SCALE = 2.25
 const EDGE_ZONE_PX = 110
 const EDGE_FADE_DELAY_MS = 2000
 const WHEEL_NAV_THROTTLE_MS = 140
+const ALPHA_CAPABLE_EXTS = new Set(['.png', '.webp', '.psd', '.psb', '.gif', '.avif', '.ico', '.svg', '.tif', '.tiff'])
+
+type AlphaBackdropMode = 'checkerboard' | 'dark' | 'light'
+
+let alphaProbeCanvas: HTMLCanvasElement | null = null
+
+export function detectImageTransparency(img: HTMLImageElement, ext: string): boolean {
+  if (!ALPHA_CAPABLE_EXTS.has(ext.toLowerCase())) return false
+  const nw = img.naturalWidth
+  const nh = img.naturalHeight
+  if (!nw || !nh) return false
+  try {
+    if (!alphaProbeCanvas) {
+      alphaProbeCanvas = document.createElement('canvas')
+    }
+    const maxSample = 96
+    const scale = Math.min(1, maxSample / Math.max(nw, nh))
+    const sw = Math.max(1, Math.round(nw * scale))
+    const sh = Math.max(1, Math.round(nh * scale))
+    alphaProbeCanvas.width = sw
+    alphaProbeCanvas.height = sh
+    const ctx = alphaProbeCanvas.getContext('2d', { willReadFrequently: true })
+    if (!ctx) return false
+    ctx.clearRect(0, 0, sw, sh)
+    ctx.drawImage(img, 0, 0, sw, sh)
+    const { data } = ctx.getImageData(0, 0, sw, sh)
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] < 254) return true
+    }
+    return false
+  } catch {
+    return false
+  }
+}
 
 interface TransformState {
   scale: number
@@ -55,10 +100,21 @@ const ImageStage: React.FC<{
   asset: Asset
   fileUrl: string
   wheelMode: 'zoom' | 'navigate'
+  alphaBackdrop: AlphaBackdropMode
+  onAlphaDetected: (hasAlpha: boolean) => void
   onNavigateWheel: (dir: -1 | 1) => void
   onZoomDisplayChange: (scale: number) => void
   controlRef: React.MutableRefObject<ImageControlHandle | null>
-}> = ({ asset, fileUrl, wheelMode, onNavigateWheel, onZoomDisplayChange, controlRef }) => {
+}> = ({
+  asset,
+  fileUrl,
+  wheelMode,
+  alphaBackdrop,
+  onAlphaDetected,
+  onNavigateWheel,
+  onZoomDisplayChange,
+  controlRef
+}) => {
   const stageRef = useRef<HTMLDivElement>(null)
   const imgRef = useRef<HTMLImageElement>(null)
   const tfRef = useRef<TransformState>({ scale: 1, x: 0, y: 0, rotation: 0 })
@@ -79,6 +135,7 @@ const ImageStage: React.FC<{
 
   const [isDragging, setIsDragging] = useState(false)
   const [canPan, setCanPan] = useState(false)
+  const [hasAlpha, setHasAlpha] = useState(false)
 
   const applyTransform = useCallback(
     (animate: boolean) => {
@@ -106,11 +163,20 @@ const ImageStage: React.FC<{
 
   useEffect(() => {
     tfRef.current = { scale: 1, x: 0, y: 0, rotation: 0 }
+    setHasAlpha(false)
+    onAlphaDetected(false)
     applyTransform(false)
+    // Also probe immediately if image is already synchronously complete from browser cache
+    const el = imgRef.current
+    if (el && el.complete && el.naturalWidth > 0) {
+      const detected = detectImageTransparency(el, asset.ext)
+      setHasAlpha(detected)
+      onAlphaDetected(detected)
+    }
     return () => {
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current)
     }
-  }, [asset.id, applyTransform])
+  }, [asset.id, asset.ext, applyTransform, onAlphaDetected])
 
   const stepScale = useCallback(
     (dir: 1 | -1, anchorClientX?: number, anchorClientY?: number, animate = false) => {
@@ -283,11 +349,26 @@ const ImageStage: React.FC<{
     >
       <img
         ref={imgRef}
+        data-inline-preview-img="true"
         src={fileUrl}
         alt={asset.fileName}
+        crossOrigin="anonymous"
         draggable={false}
         decoding="async"
-        className="max-w-[94%] max-h-[92%] object-contain select-none pointer-events-none"
+        onLoad={(e) => {
+          const detected = detectImageTransparency(e.currentTarget, asset.ext)
+          setHasAlpha(detected)
+          onAlphaDetected(detected)
+        }}
+        className={`max-w-[94%] max-h-[92%] w-auto h-auto select-none pointer-events-none ${
+          hasAlpha
+            ? alphaBackdrop === 'checkerboard'
+              ? 'alpha-checkerboard'
+              : alphaBackdrop === 'dark'
+                ? 'alpha-backdrop-dark'
+                : 'alpha-backdrop-light'
+            : ''
+        }`}
         style={{
           willChange: 'transform',
           transformOrigin: 'center center'
@@ -299,7 +380,18 @@ const ImageStage: React.FC<{
 
 // ===================== Main Integrated Inline Preview Pane =====================
 export const InlinePreview: React.FC = () => {
-  const { assets, settings, previewAssetId, setPreviewAssetId, selectAsset, showToast } = useLibraryStore()
+  const { assets, previewWheelMode, previewAssetId, setPreviewAssetId, selectAsset, refreshAssets, showToast } =
+    useLibraryStore(
+      useShallow((s) => ({
+        assets: s.assets,
+        previewWheelMode: s.settings.previewWheelMode,
+        previewAssetId: s.previewAssetId,
+        setPreviewAssetId: s.setPreviewAssetId,
+        selectAsset: s.selectAsset,
+        refreshAssets: s.refreshAssets,
+        showToast: s.showToast
+      }))
+    )
 
   const currentIndex = useMemo(
     () => (previewAssetId != null ? assets.findIndex((a) => a.id === previewAssetId) : -1),
@@ -320,6 +412,8 @@ export const InlinePreview: React.FC = () => {
   const hoveringRightBtnRef = useRef(false)
 
   const [zoomScale, setZoomScale] = useState(1)
+  const [imageHasAlpha, setImageHasAlpha] = useState(false)
+  const [alphaBackdrop, setAlphaBackdrop] = useState<AlphaBackdropMode>('checkerboard')
   const [videoError, setVideoError] = useState(false)
   const [textData, setTextData] = useState<TextContentResult | null>(null)
   const [textLoading, setTextLoading] = useState(false)
@@ -430,10 +524,10 @@ export const InlinePreview: React.FC = () => {
     [goPrev, goNext]
   )
 
-  // Wheel navigation for non-image media types (video/audio/other respect wheelMode XOR Ctrl; text respects Ctrl+wheel so normal scroll works)
+  // Wheel navigation for non-image/non-model media types (3D/CAD and ImageStage handle wheel directly)
   useEffect(() => {
     const el = stageContainerRef.current
-    if (!el || !asset || asset.mediaType === 'image') return
+    if (!el || !asset || asset.mediaType === 'image' || asset.mediaType === 'model') return
     const onWheel = (e: WheelEvent) => {
       if (e.deltaY === 0) return
       const ctrlHeld = e.ctrlKey || e.metaKey
@@ -443,7 +537,7 @@ export const InlinePreview: React.FC = () => {
         handleThrottledWheelNavigate(e.deltaY < 0 ? -1 : 1)
         return
       }
-      const shouldNavigate = (settings.previewWheelMode === 'navigate') !== ctrlHeld
+      const shouldNavigate = (previewWheelMode === 'navigate') !== ctrlHeld
       if (shouldNavigate) {
         e.preventDefault()
         handleThrottledWheelNavigate(e.deltaY < 0 ? -1 : 1)
@@ -451,7 +545,7 @@ export const InlinePreview: React.FC = () => {
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
-  }, [asset, settings.previewWheelMode, handleThrottledWheelNavigate])
+  }, [asset, previewWheelMode, handleThrottledWheelNavigate])
 
   useEffect(() => {
     if (!asset) return
@@ -468,11 +562,11 @@ export const InlinePreview: React.FC = () => {
       } else if (e.key === 'ArrowRight') {
         e.preventDefault()
         goNext()
-      } else if (e.key === '+' || e.key === '=') {
+      } else if (asset.mediaType === 'image' && (e.key === '+' || e.key === '=')) {
         imageControlRef.current?.zoomStep(1)
-      } else if (e.key === '-') {
+      } else if (asset.mediaType === 'image' && e.key === '-') {
         imageControlRef.current?.zoomStep(-1)
-      } else if (e.key === '0') {
+      } else if (asset.mediaType === 'image' && e.key === '0') {
         imageControlRef.current?.resetFit()
       }
     }
@@ -494,7 +588,9 @@ export const InlinePreview: React.FC = () => {
         <ImageStage
           asset={asset}
           fileUrl={fileUrl}
-          wheelMode={settings.previewWheelMode}
+          wheelMode={previewWheelMode}
+          alphaBackdrop={alphaBackdrop}
+          onAlphaDetected={setImageHasAlpha}
           onNavigateWheel={handleThrottledWheelNavigate}
           onZoomDisplayChange={setZoomScale}
           controlRef={imageControlRef}
@@ -622,6 +718,51 @@ export const InlinePreview: React.FC = () => {
             )}
           </div>
         </div>
+      )
+    }
+
+    if (asset.mediaType === 'model' && isCadExt(asset.ext)) {
+      return (
+        <Suspense
+          fallback={
+            <div className="w-full h-full flex flex-col items-center justify-center gap-3 p-6">
+              <RefreshCw className="w-6 h-6 animate-spin" style={{ color: 'var(--accent)' }} />
+              <div className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                正在加载 CAD 预览引擎...
+              </div>
+            </div>
+          }
+        >
+          <CadPreview
+            asset={asset}
+            wheelMode={previewWheelMode}
+            onNavigateWheel={handleThrottledWheelNavigate}
+            onMetadataUpdated={refreshAssets}
+          />
+        </Suspense>
+      )
+    }
+
+    if (asset.mediaType === 'model' && is3DModelExt(asset.ext)) {
+      return (
+        <Suspense
+          fallback={
+            <div className="w-full h-full flex flex-col items-center justify-center gap-3 p-6">
+              <RefreshCw className="w-6 h-6 animate-spin" style={{ color: 'var(--accent)' }} />
+              <div className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                正在加载 3D 渲染引擎...
+              </div>
+            </div>
+          }
+        >
+          <Model3DPreview
+            asset={asset}
+            wheelMode={previewWheelMode}
+            onNavigateWheel={handleThrottledWheelNavigate}
+            onThumbSaved={refreshAssets}
+            onToast={showToast}
+          />
+        </Suspense>
       )
     }
 
@@ -775,6 +916,36 @@ export const InlinePreview: React.FC = () => {
               >
                 <RotateCw className="w-3.5 h-3.5" />
               </button>
+              {imageHasAlpha && (
+                <>
+                  <div className="w-px h-4 mx-0.5" style={{ backgroundColor: 'var(--border-subtle)' }} />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setAlphaBackdrop((m) =>
+                        m === 'checkerboard' ? 'dark' : m === 'dark' ? 'light' : 'checkerboard'
+                      )
+                    }
+                    className="h-7 px-2 rounded text-xs flex items-center gap-1.5 hover:bg-[var(--bg-hover)] cursor-pointer"
+                    style={{ color: 'var(--accent)' }}
+                    title="检测到 Alpha 透明通道：点击切换透明底色（棋盘格 / 深色 / 浅色）"
+                  >
+                    <span
+                      className={`w-3.5 h-3.5 rounded-[3px] shrink-0 ${
+                        alphaBackdrop === 'checkerboard'
+                          ? 'alpha-checkerboard'
+                          : alphaBackdrop === 'dark'
+                            ? 'alpha-backdrop-dark'
+                            : 'alpha-backdrop-light'
+                      }`}
+                      style={{ backgroundSize: '8px 8px', boxShadow: '0 0 0 1px var(--border-strong)' }}
+                    />
+                    <span>
+                      {alphaBackdrop === 'checkerboard' ? '棋盘底' : alphaBackdrop === 'dark' ? '深色底' : '浅色底'}
+                    </span>
+                  </button>
+                </>
+              )}
             </div>
           )}
 

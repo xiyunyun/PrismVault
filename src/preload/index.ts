@@ -8,7 +8,8 @@ const api: XiyunApi = {
     addPath: (dirPath, alias) => ipcRenderer.invoke('sources:addPath', dirPath, alias),
     remove: (id) => ipcRenderer.invoke('sources:remove', id),
     update: (id, patch) => ipcRenderer.invoke('sources:update', id, patch),
-    scan: (id) => ipcRenderer.invoke('sources:scan', id)
+    scan: (id) => ipcRenderer.invoke('sources:scan', id),
+    convertToGroups: (id) => ipcRenderer.invoke('sources:convertToGroups', id)
   },
   assets: {
     query: (filter) => ipcRenderer.invoke('assets:query', filter),
@@ -19,7 +20,11 @@ const api: XiyunApi = {
     setStatus: (ids, status) => ipcRenderer.invoke('assets:setStatus', ids, status),
     moveToTrash: (ids) => ipcRenderer.invoke('assets:moveToTrash', ids),
     readTextContent: (id) => ipcRenderer.invoke('assets:readTextContent', id),
-    removeMissing: (ids) => ipcRenderer.invoke('assets:removeMissing', ids)
+    removeMissing: (ids) => ipcRenderer.invoke('assets:removeMissing', ids),
+    parseCad: (id) => ipcRenderer.invoke('assets:parseCad', id),
+    saveRenderedThumb: (id, pngDataUrl, extraMetaPatch) =>
+      ipcRenderer.invoke('assets:saveRenderedThumb', id, pngDataUrl, extraMetaPatch),
+    getMissingModelThumbs: () => ipcRenderer.invoke('assets:getMissingModelThumbs')
   },
   groups: {
     listTree: () => ipcRenderer.invoke('groups:listTree'),

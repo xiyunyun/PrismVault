@@ -2,10 +2,22 @@ import fs from 'fs'
 import fsp from 'fs/promises'
 import path from 'path'
 import { BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
-import { getDb, getDbPath, getDefaultThumbCacheDir, getThumbCacheDir, setThumbCacheDir } from '../db'
+import sharp from 'sharp'
+import {
+  ensureThumbSubdirs,
+  getCadThumbCacheDir,
+  getDb,
+  getDbPath,
+  getDefaultThumbCacheDir,
+  getModelThumbCacheDir,
+  getThumbCacheDir,
+  setThumbCacheDir,
+  THUMB_SUBDIRS
+} from '../db'
 import {
   assignAssetsToGroups,
   batchAppendNote,
+  convertSourceRootToGroups,
   createGroup,
   createSourceRoot,
   deleteAssetsByIds,
@@ -14,14 +26,18 @@ import {
   getAllSettings,
   getAssetById,
   getAssetsMissingThumbs,
+  getAssetThumbRefsByRootId,
   getLibraryStats,
+  getMissing3DModelThumbs,
   listGroupTree,
   listSourceRoots,
+  mergeAssetExtraMeta,
   queryAssets,
   removeMissingAssets,
   setAssetsStatus,
   unassignAssetsFromGroups,
   updateAssetNote,
+  updateAssetThumbAndDims,
   updateGroup,
   updateSettings,
   updateSourceRoot
@@ -30,6 +46,8 @@ import { indexScanner } from '../indexer/scanner'
 import { thumbnailQueue } from '../indexer/thumbnailer'
 import { watcherManager } from '../indexer/watcher'
 import { resolveFfmpeg } from '../indexer/ffmpeg'
+import { parseCadForPreview } from '../indexer/cad'
+import { isCadExt } from '@shared/mediaTypes'
 import {
   commitClipboardImport,
   getClipboardStats,
@@ -38,10 +56,12 @@ import {
   migrateClipboardDir
 } from '../indexer/clipboardImport'
 import { inspectEagleLibrary, migrateFromEagle } from '../indexer/eagleMigrator'
-import { syncWindowTitleBarTheme } from '../index'
+import { resolveEffectiveBackdropStyle, syncWindowAppearance } from '../index'
+import { invalidateMediaProtocolCache } from '../protocol'
 import { cloudUpdater, getAppInfo } from '../updater'
 import type {
   AppSettings,
+  AssetExtraMeta,
   AssetQueryFilter,
   AssetStatus,
   CacheStats,
@@ -55,24 +75,31 @@ const THUMB_FILE_PATTERN = /^(?:preview_)?\d+(?:_\d+)?\.webp$/i
 async function migrateThumbCacheFiles(oldDir: string, newDir: string): Promise<MoveThumbCacheResult> {
   const resolvedOld = path.resolve(oldDir)
   const resolvedNew = path.resolve(newDir)
-  fs.mkdirSync(resolvedNew, { recursive: true })
+  ensureThumbSubdirs(resolvedNew)
 
   let movedCount = 0
   let failedCount = 0
 
   if (resolvedOld.toLowerCase() !== resolvedNew.toLowerCase() && fs.existsSync(resolvedOld)) {
-    const entries = await fsp.readdir(resolvedOld).catch(() => [] as string[])
-    for (const name of entries) {
-      if (!THUMB_FILE_PATTERN.test(name)) continue
-      const src = path.join(resolvedOld, name)
-      const dst = path.join(resolvedNew, name)
-      try {
-        // Cross-drive safe move: copy first, then unlink old file
-        await fsp.copyFile(src, dst)
-        await fsp.unlink(src).catch(() => undefined)
-        movedCount++
-      } catch {
-        failedCount++
+    const subPaths = ['', ...THUMB_SUBDIRS]
+    for (const sub of subPaths) {
+      const srcDir = sub ? path.join(resolvedOld, sub) : resolvedOld
+      const dstDir = sub ? path.join(resolvedNew, sub) : resolvedNew
+      if (!fs.existsSync(srcDir)) continue
+      fs.mkdirSync(dstDir, { recursive: true })
+      const entries = await fsp.readdir(srcDir).catch(() => [] as string[])
+      for (const name of entries) {
+        if (!THUMB_FILE_PATTERN.test(name)) continue
+        const src = path.join(srcDir, name)
+        const dst = path.join(dstDir, name)
+        try {
+          // Cross-drive safe move: copy first, then unlink old file
+          await fsp.copyFile(src, dst)
+          await fsp.unlink(src).catch(() => undefined)
+          movedCount++
+        } catch {
+          failedCount++
+        }
       }
     }
   }
@@ -86,6 +113,9 @@ async function migrateThumbCacheFiles(oldDir: string, newDir: string): Promise<M
 }
 
 function broadcast(channel: string, payload?: unknown): void {
+  if (channel === 'event:assets-changed') {
+    invalidateMediaProtocolCache()
+  }
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) {
       win.webContents.send(channel, payload)
@@ -134,10 +164,53 @@ export function registerIpcHandlers(): void {
     return root
   })
 
-  ipcMain.handle('sources:remove', (_e, id: number) => {
+  ipcMain.handle('sources:remove', async (_e, id: number) => {
     watcherManager.stopWatcher(id)
+    const shouldDeleteThumbs = getAllSettings().deleteThumbsOnRemoveSource
+    const thumbRefs = shouldDeleteThumbs ? getAssetThumbRefsByRootId(id) : []
+
     deleteSourceRoot(id)
+
+    let removedThumbs = 0
+    if (shouldDeleteThumbs && thumbRefs.length > 0) {
+      const cacheRoot = path.resolve(getThumbCacheDir())
+      const idSet = new Set<number>(thumbRefs.map((r) => r.id))
+
+      // 1. Delete direct thumbnails (including models/<id>.webp and cad/<id>.webp)
+      for (const ref of thumbRefs) {
+        if (!ref.thumbPath) continue
+        const normalized = ref.thumbPath.replace(/\\/g, '/').replace(/^\/+/, '')
+        const candidate = path.resolve(cacheRoot, normalized)
+        if (!candidate.toLowerCase().startsWith(cacheRoot.toLowerCase() + path.sep)) continue
+        try {
+          await fsp.unlink(candidate)
+          removedThumbs++
+        } catch {
+          // ignore already-removed or missing thumb
+        }
+      }
+
+      // 2. Also remove any high-res transcoded PSD/TIFF preview caches (preview_<assetId>_<mtime>.webp)
+      try {
+        const rootFiles = await fsp.readdir(cacheRoot)
+        for (const f of rootFiles) {
+          const m = /^preview_(\d+)_\d+\.webp$/i.exec(f)
+          if (m && idSet.has(Number(m[1]))) {
+            try {
+              await fsp.unlink(path.join(cacheRoot, f))
+              removedThumbs++
+            } catch {
+              // ignore
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     broadcast('event:assets-changed')
+    return { removedThumbs }
   })
 
   ipcMain.handle(
@@ -151,6 +224,14 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('sources:scan', (_e, id?: number) => {
     indexScanner.scanSource(id).catch(() => undefined)
+  })
+
+  ipcMain.handle('sources:convertToGroups', (_e, id: number) => {
+    const res = convertSourceRootToGroups(id)
+    if (res.ok) {
+      broadcast('event:assets-changed')
+    }
+    return res
   })
 
   // ===================== Assets =====================
@@ -222,6 +303,76 @@ export function registerIpcHandlers(): void {
     }
   })
 
+  ipcMain.handle('assets:parseCad', async (_e, id: number) => {
+    const asset = getAssetById(id)
+    if (!asset || !fs.existsSync(asset.filePath)) {
+      return {
+        ok: false,
+        format: 'dwg' as const,
+        layers: [],
+        batches: [],
+        texts: [],
+        bounds: null,
+        entityCount: 0,
+        segmentCount: 0,
+        blockCount: 0,
+        embeddedPreviewDataUrl: null,
+        error: 'CAD 文件不存在或已离线。'
+      }
+    }
+    const res = await parseCadForPreview(asset.filePath)
+    if (res.ok) {
+      mergeAssetExtraMeta(asset.id, {
+        cadVersion: res.version,
+        cadEntityCount: res.entityCount,
+        cadLayerCount: res.layers.length,
+        cadBlockCount: res.blockCount,
+        cadLayers: res.layers.slice(0, 40).map((l) => l.name),
+        cadHasEmbeddedPreview: Boolean(res.embeddedPreviewDataUrl)
+      })
+    }
+    return res
+  })
+
+  ipcMain.handle(
+    'assets:saveRenderedThumb',
+    async (_e, id: number, pngDataUrl: string, extraMetaPatch?: Partial<AssetExtraMeta>) => {
+      const asset = getAssetById(id)
+      if (!asset) return null
+      const match = /^data:image\/(?:png|webp|jpeg);base64,(.+)$/i.exec(pngDataUrl || '')
+      if (!match) return null
+
+      const buf = Buffer.from(match[1], 'base64')
+      if (buf.length < 32) return null
+
+      const isCad = isCadExt(asset.ext)
+      const subDir = isCad ? 'cad' : 'models'
+      const targetDir = isCad ? getCadThumbCacheDir() : getModelThumbCacheDir()
+      const outPath = path.join(targetDir, `${asset.id}.webp`)
+      const relPath = `${subDir}/${asset.id}.webp`
+
+      const img = sharp(buf)
+      const meta = await img.metadata()
+      await img
+        .resize({ width: 480, height: 480, fit: 'inside', withoutEnlargement: true })
+        .webp({ quality: 84 })
+        .toFile(outPath)
+
+      if (!fs.existsSync(outPath)) return null
+
+      const width = meta.width ?? 480
+      const height = meta.height ?? 360
+      updateAssetThumbAndDims(asset.id, relPath, width, height)
+      if (extraMetaPatch && Object.keys(extraMetaPatch).length > 0) {
+        mergeAssetExtraMeta(asset.id, extraMetaPatch)
+      }
+      broadcast('event:thumb-ready', { assetId: asset.id, thumbPath: relPath, width, height })
+      return relPath
+    }
+  )
+
+  ipcMain.handle('assets:getMissingModelThumbs', () => getMissing3DModelThumbs())
+
   // ===================== Groups =====================
   ipcMain.handle('groups:listTree', () => listGroupTree())
 
@@ -256,17 +407,33 @@ export function registerIpcHandlers(): void {
   })
 
   // ===================== Settings & Maintenance =====================
-  ipcMain.handle('settings:getAll', () => getAllSettings())
+  ipcMain.handle('settings:getAll', () => {
+    const current = getAllSettings()
+    const effectiveBackdrop = resolveEffectiveBackdropStyle(current.backdropStyle)
+    return effectiveBackdrop === current.backdropStyle
+      ? current
+      : { ...current, backdropStyle: effectiveBackdrop }
+  })
 
   ipcMain.handle('settings:update', async (_e, patch: Partial<AppSettings>) => {
-    const updated = updateSettings(patch)
-    if (patch.theme !== undefined) {
-      syncWindowTitleBarTheme(updated.theme)
+    const safePatch: Partial<AppSettings> =
+      patch.backdropStyle !== undefined
+        ? { ...patch, backdropStyle: resolveEffectiveBackdropStyle(patch.backdropStyle) }
+        : patch
+    const updated = updateSettings(safePatch)
+    const effectiveBackdrop = resolveEffectiveBackdropStyle(updated.backdropStyle)
+    const normalized =
+      effectiveBackdrop === updated.backdropStyle
+        ? updated
+        : { ...updated, backdropStyle: effectiveBackdrop }
+
+    if (safePatch.theme !== undefined || safePatch.backdropStyle !== undefined) {
+      syncWindowAppearance(normalized.theme, normalized.backdropStyle)
     }
-    if (patch.ffmpegPath !== undefined) {
+    if (safePatch.ffmpegPath !== undefined) {
       await resolveFfmpeg(true)
     }
-    return updated
+    return normalized
   })
 
   ipcMain.handle('settings:getCacheStats', async (): Promise<CacheStats> => {
@@ -274,22 +441,25 @@ export function registerIpcHandlers(): void {
     const dbPath = getDbPath()
     let thumbCount = 0
     let thumbBytes = 0
-    try {
-      const files = await fsp.readdir(cacheDir)
-      for (const f of files) {
-        if (!THUMB_FILE_PATTERN.test(f)) continue
-        try {
-          const st = await fsp.stat(path.join(cacheDir, f))
-          if (st.isFile()) {
-            thumbCount++
-            thumbBytes += st.size
+    const dirsToScan = [cacheDir, ...THUMB_SUBDIRS.map((sub) => path.join(cacheDir, sub))]
+    for (const dir of dirsToScan) {
+      try {
+        const files = await fsp.readdir(dir)
+        for (const f of files) {
+          if (!THUMB_FILE_PATTERN.test(f)) continue
+          try {
+            const st = await fsp.stat(path.join(dir, f))
+            if (st.isFile()) {
+              thumbCount++
+              thumbBytes += st.size
+            }
+          } catch {
+            // ignore
           }
-        } catch {
-          // ignore
         }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
     }
     let dbBytes = 0
     try {
@@ -303,15 +473,18 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('settings:clearThumbCache', async () => {
     thumbnailQueue.clear()
     const cacheDir = getThumbCacheDir()
-    try {
-      const files = await fsp.readdir(cacheDir)
-      await Promise.all(
-        files
-          .filter((f) => THUMB_FILE_PATTERN.test(f))
-          .map((f) => fsp.unlink(path.join(cacheDir, f)).catch(() => undefined))
-      )
-    } catch {
-      // ignore
+    const dirsToClear = [cacheDir, ...THUMB_SUBDIRS.map((sub) => path.join(cacheDir, sub))]
+    for (const dir of dirsToClear) {
+      try {
+        const files = await fsp.readdir(dir)
+        await Promise.all(
+          files
+            .filter((f) => THUMB_FILE_PATTERN.test(f))
+            .map((f) => fsp.unlink(path.join(dir, f)).catch(() => undefined))
+        )
+      } catch {
+        // ignore
+      }
     }
     getDb().prepare('UPDATE assets SET thumb_path = NULL').run()
     broadcast('event:assets-changed')

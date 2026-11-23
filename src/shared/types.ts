@@ -1,12 +1,13 @@
 import type { MediaType } from './mediaTypes'
 
 export type AssetStatus = 'active' | 'missing' | 'hidden'
-export type SmartView = 'all' | 'ungrouped' | 'recent' | 'missing'
+export type SmartView = 'all' | 'ungrouped' | 'recent' | 'missing' | 'hidden'
 export type SortField = 'name' | 'created_at' | 'modified_at' | 'file_size'
 export type SortOrder = 'asc' | 'desc'
 export type ViewMode = 'waterfall' | 'grid'
 export type GridAspectRatio = '4:3' | '1:1' | '16:9'
 export type GridFitMode = 'cover' | 'contain'
+export type BackdropStyle = 'aurora' | 'mica' | 'pastel' | 'solid'
 
 export interface AssetExtraMeta {
   fps?: number
@@ -25,6 +26,77 @@ export interface AssetExtraMeta {
   layerNames?: string[]
   colorMode?: string
   bitsPerChannel?: number
+  // 3D model metadata
+  vertexCount?: number
+  triangleCount?: number
+  meshCount?: number
+  materialCount?: number
+  animationCount?: number
+  animationNames?: string[]
+  boundsX?: number
+  boundsY?: number
+  boundsZ?: number
+  // CAD (DWG / DXF) metadata
+  cadVersion?: string
+  cadEntityCount?: number
+  cadLayerCount?: number
+  cadBlockCount?: number
+  cadLayers?: string[]
+  cadHasEmbeddedPreview?: boolean
+}
+
+export interface CadLayerInfo {
+  name: string
+  color: string
+  entityCount: number
+  visible: boolean
+}
+
+export interface CadBatch {
+  layerIndex: number
+  /** '#rrggbb' or 'default' for theme-adaptive ACI 7 / foreground color */
+  color: string
+  /** Flat [x1, y1, x2, y2, ...] line segments relative to scene origin */
+  segments: Float32Array
+  minX: number
+  minY: number
+  maxX: number
+  maxY: number
+}
+
+export interface CadTextItem {
+  layerIndex: number
+  color: string
+  x: number
+  y: number
+  height: number
+  rotation: number
+  text: string
+}
+
+export interface CadPreviewData {
+  ok: boolean
+  format: 'dwg' | 'dxf'
+  version?: string
+  layers: CadLayerInfo[]
+  batches: CadBatch[]
+  texts: CadTextItem[]
+  bounds: { minX: number; minY: number; maxX: number; maxY: number } | null
+  entityCount: number
+  segmentCount: number
+  blockCount: number
+  unknownEntityCount?: number
+  spaceUsed?: 'model' | 'paper'
+  parseMs?: number
+  embeddedPreviewDataUrl: string | null
+  error?: string
+}
+
+export interface MissingModelThumbItem {
+  id: number
+  filePath: string
+  fileName: string
+  ext: string
 }
 
 export interface SourceRoot {
@@ -36,6 +108,16 @@ export interface SourceRoot {
   lastScannedAt: number | null
   createdAt: number
   assetCount: number
+}
+
+export interface ConvertSourceToGroupsResult {
+  ok: boolean
+  rootGroupId: number
+  rootGroupName: string
+  createdGroups: number
+  reusedGroups: number
+  assignedAssets: number
+  error?: string
 }
 
 export interface Asset {
@@ -98,6 +180,7 @@ export interface LibraryStats {
   ungroupedCount: number
   recentCount: number
   missingCount: number
+  hiddenCount: number
   byType: Record<MediaType, number>
   byRoot: Record<number, number>
 }
@@ -116,6 +199,8 @@ export interface ScanProgress {
 
 export interface AppSettings {
   theme: 'dark' | 'light'
+  backdropStyle: BackdropStyle
+  backdropMotion: boolean
   fontFamily: string
   fontSize: number
   viewMode: ViewMode
@@ -132,6 +217,8 @@ export interface AppSettings {
   autoScanOnStartup: boolean
   autoCheckUpdates: boolean
   updateMirrorUrl: string
+  deleteThumbsOnRemoveSource: boolean
+  lastSeenVersion: string
 }
 
 export type AppInstallType = 'installer' | 'portable' | 'dev'
@@ -142,6 +229,7 @@ export interface AppInfo {
   isPackaged: boolean
   platform: string
   arch: string
+  micaSupported: boolean
   repoUrl: string
   releasesUrl: string
 }
@@ -151,6 +239,7 @@ export interface UpdateAssetInfo {
   size: number
   downloadUrl: string
   kind: 'installer' | 'portable'
+  sha256?: string
 }
 
 export interface UpdateReleaseInfo {
@@ -163,6 +252,8 @@ export interface UpdateReleaseInfo {
   installerAsset: UpdateAssetInfo | null
   portableAsset: UpdateAssetInfo | null
   recommendedAsset: UpdateAssetInfo | null
+  mirrors?: string[]
+  checkSource?: string
 }
 
 export interface UpdateDownloadProgress {
@@ -173,6 +264,8 @@ export interface UpdateDownloadProgress {
   totalBytes: number
   percent: number
   bytesPerSecond: number
+  routeLabel?: string
+  verifiedSha256?: boolean
 }
 
 export type UpdateStatus =
@@ -305,9 +398,10 @@ export interface XiyunApi {
     list: () => Promise<SourceRoot[]>
     pickAndAdd: () => Promise<SourceRoot | null>
     addPath: (dirPath: string, alias?: string) => Promise<SourceRoot>
-    remove: (id: number) => Promise<void>
+    remove: (id: number) => Promise<{ removedThumbs: number }>
     update: (id: number, patch: { alias?: string; watchEnabled?: boolean; ignorePatterns?: string[] }) => Promise<SourceRoot>
     scan: (id?: number) => Promise<void>
+    convertToGroups: (id: number) => Promise<ConvertSourceToGroupsResult>
   }
   assets: {
     query: (filter: AssetQueryFilter) => Promise<AssetQueryResult>
@@ -319,6 +413,13 @@ export interface XiyunApi {
     moveToTrash: (ids: number[]) => Promise<{ trashed: number; failed: string[] }>
     readTextContent: (id: number) => Promise<TextContentResult>
     removeMissing: (ids?: number[]) => Promise<number>
+    parseCad: (id: number) => Promise<CadPreviewData>
+    saveRenderedThumb: (
+      id: number,
+      pngDataUrl: string,
+      extraMetaPatch?: Partial<AssetExtraMeta>
+    ) => Promise<string | null>
+    getMissingModelThumbs: () => Promise<MissingModelThumbItem[]>
   }
   groups: {
     listTree: () => Promise<GroupNode[]>

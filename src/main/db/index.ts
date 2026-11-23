@@ -26,13 +26,34 @@ export function getDefaultThumbCacheDir(): string {
   return defaultCacheDirPath
 }
 
+export const THUMB_SUBDIRS = ['models', 'cad'] as const
+
+export function ensureThumbSubdirs(baseDir: string): void {
+  fs.mkdirSync(baseDir, { recursive: true })
+  for (const sub of THUMB_SUBDIRS) {
+    fs.mkdirSync(path.join(baseDir, sub), { recursive: true })
+  }
+}
+
 export function getThumbCacheDir(): string {
   return activeCacheDirPath || defaultCacheDirPath
 }
 
+export function getModelThumbCacheDir(): string {
+  const dir = path.join(getThumbCacheDir(), 'models')
+  fs.mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+export function getCadThumbCacheDir(): string {
+  const dir = path.join(getThumbCacheDir(), 'cad')
+  fs.mkdirSync(dir, { recursive: true })
+  return dir
+}
+
 export function setThumbCacheDir(dirPath: string): string {
   const target = dirPath && dirPath.trim() ? path.resolve(dirPath.trim()) : defaultCacheDirPath
-  fs.mkdirSync(target, { recursive: true })
+  ensureThumbSubdirs(target)
   activeCacheDirPath = target
   return activeCacheDirPath
 }
@@ -66,7 +87,7 @@ export function initDatabase(): DatabaseSync {
   fs.mkdirSync(dataRoot, { recursive: true })
 
   defaultCacheDirPath = path.join(dataRoot, 'thumbs')
-  fs.mkdirSync(defaultCacheDirPath, { recursive: true })
+  ensureThumbSubdirs(defaultCacheDirPath)
   activeCacheDirPath = defaultCacheDirPath
 
   defaultClipboardDirPath = path.join(dataRoot, 'clipboard')
@@ -80,6 +101,7 @@ export function initDatabase(): DatabaseSync {
   db.exec('PRAGMA foreign_keys = ON;')
   db.exec('PRAGMA synchronous = NORMAL;')
   db.exec('PRAGMA temp_store = MEMORY;')
+  db.exec('PRAGMA cache_size = -16000;')
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS source_roots (
@@ -98,7 +120,7 @@ export function initDatabase(): DatabaseSync {
       file_path TEXT NOT NULL UNIQUE,
       file_name TEXT NOT NULL,
       ext TEXT NOT NULL,
-      media_type TEXT NOT NULL CHECK(media_type IN ('image','video','audio','text','other')),
+      media_type TEXT NOT NULL CHECK(media_type IN ('image','video','audio','text','model','other')),
       mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
       file_size INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
@@ -123,6 +145,12 @@ export function initDatabase(): DatabaseSync {
     CREATE INDEX IF NOT EXISTS idx_assets_modified ON assets(modified_at DESC);
     CREATE INDEX IF NOT EXISTS idx_assets_size ON assets(file_size DESC);
     CREATE INDEX IF NOT EXISTS idx_assets_name ON assets(file_name COLLATE NOCASE);
+    CREATE INDEX IF NOT EXISTS idx_assets_status_modified ON assets(status, modified_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_assets_status_created ON assets(status, created_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_assets_status_size ON assets(status, file_size DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_assets_status_type ON assets(status, media_type);
+    CREATE INDEX IF NOT EXISTS idx_assets_status_root ON assets(status, root_id);
+    CREATE INDEX IF NOT EXISTS idx_assets_status_indexed ON assets(status, indexed_at DESC);
 
     CREATE TABLE IF NOT EXISTS groups (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -174,6 +202,98 @@ export function initDatabase(): DatabaseSync {
     );
   `)
 
+  // Seamless schema migration for v0.1.0/v0.2.0 databases whose assets.media_type CHECK lacked 'model'
+  try {
+    const tableRow = db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'assets'`)
+      .get() as { sql?: string } | undefined
+    if (tableRow?.sql && !tableRow.sql.includes("'model'")) {
+      db.exec('PRAGMA foreign_keys = OFF;')
+      db.exec('BEGIN;')
+      try {
+        db.exec(`
+          DROP TRIGGER IF EXISTS assets_ai;
+          DROP TRIGGER IF EXISTS assets_ad;
+          DROP TRIGGER IF EXISTS assets_au;
+
+          CREATE TABLE assets_v3_migrated (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            root_id INTEGER NOT NULL REFERENCES source_roots(id) ON DELETE CASCADE,
+            file_path TEXT NOT NULL UNIQUE,
+            file_name TEXT NOT NULL,
+            ext TEXT NOT NULL,
+            media_type TEXT NOT NULL CHECK(media_type IN ('image','video','audio','text','model','other')),
+            mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+            file_size INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            modified_at INTEGER NOT NULL,
+            fingerprint TEXT,
+            width INTEGER,
+            height INTEGER,
+            duration REAL,
+            extra_meta TEXT,
+            note TEXT NOT NULL DEFAULT '',
+            thumb_path TEXT,
+            text_snippet TEXT,
+            status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','missing','hidden')),
+            indexed_at INTEGER NOT NULL
+          );
+
+          INSERT INTO assets_v3_migrated SELECT * FROM assets;
+          DROP TABLE assets;
+          ALTER TABLE assets_v3_migrated RENAME TO assets;
+
+          CREATE INDEX IF NOT EXISTS idx_assets_root_id ON assets(root_id);
+          CREATE INDEX IF NOT EXISTS idx_assets_media_type ON assets(media_type);
+          CREATE INDEX IF NOT EXISTS idx_assets_status ON assets(status);
+          CREATE INDEX IF NOT EXISTS idx_assets_fingerprint ON assets(fingerprint);
+          CREATE INDEX IF NOT EXISTS idx_assets_created ON assets(created_at DESC);
+          CREATE INDEX IF NOT EXISTS idx_assets_modified ON assets(modified_at DESC);
+          CREATE INDEX IF NOT EXISTS idx_assets_size ON assets(file_size DESC);
+          CREATE INDEX IF NOT EXISTS idx_assets_name ON assets(file_name COLLATE NOCASE);
+          CREATE INDEX IF NOT EXISTS idx_assets_status_modified ON assets(status, modified_at DESC, id DESC);
+          CREATE INDEX IF NOT EXISTS idx_assets_status_created ON assets(status, created_at DESC, id DESC);
+          CREATE INDEX IF NOT EXISTS idx_assets_status_size ON assets(status, file_size DESC, id DESC);
+          CREATE INDEX IF NOT EXISTS idx_assets_status_type ON assets(status, media_type);
+          CREATE INDEX IF NOT EXISTS idx_assets_status_root ON assets(status, root_id);
+          CREATE INDEX IF NOT EXISTS idx_assets_status_indexed ON assets(status, indexed_at DESC);
+
+          CREATE TRIGGER IF NOT EXISTS assets_ai AFTER INSERT ON assets BEGIN
+            INSERT INTO assets_fts(rowid, file_name, note, file_path)
+            VALUES (new.id, new.file_name, new.note, new.file_path);
+          END;
+
+          CREATE TRIGGER IF NOT EXISTS assets_ad AFTER DELETE ON assets BEGIN
+            INSERT INTO assets_fts(assets_fts, rowid, file_name, note, file_path)
+            VALUES ('delete', old.id, old.file_name, old.note, old.file_path);
+          END;
+
+          CREATE TRIGGER IF NOT EXISTS assets_au AFTER UPDATE OF file_name, note, file_path ON assets BEGIN
+            INSERT INTO assets_fts(assets_fts, rowid, file_name, note, file_path)
+            VALUES ('delete', old.id, old.file_name, old.note, old.file_path);
+            INSERT INTO assets_fts(rowid, file_name, note, file_path)
+            VALUES (new.id, new.file_name, new.note, new.file_path);
+          END;
+
+          UPDATE assets
+          SET media_type = 'model'
+          WHERE media_type = 'other'
+            AND LOWER(ext) IN ('.obj', '.fbx', '.glb', '.gltf', '.stl', '.ply', '.dwg', '.dxf');
+
+          INSERT INTO assets_fts(assets_fts) VALUES('rebuild');
+        `)
+        db.exec('COMMIT;')
+      } catch (err) {
+        db.exec('ROLLBACK;')
+        throw err
+      } finally {
+        db.exec('PRAGMA foreign_keys = ON;')
+      }
+    }
+  } catch (err) {
+    console.warn('[DB] media_type migration warning:', err)
+  }
+
   // Apply custom thumbnail cache directory if user configured one
   try {
     const row = db.prepare(`SELECT value FROM app_settings WHERE key = 'thumbCacheDir'`).get() as
@@ -183,7 +303,7 @@ export function initDatabase(): DatabaseSync {
       const parsed = JSON.parse(row.value)
       if (typeof parsed === 'string' && parsed.trim()) {
         const customPath = path.resolve(parsed.trim())
-        fs.mkdirSync(customPath, { recursive: true })
+        ensureThumbSubdirs(customPath)
         activeCacheDirPath = customPath
       }
     }

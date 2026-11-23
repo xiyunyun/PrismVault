@@ -1,10 +1,11 @@
 import fs from 'fs/promises'
 import sharp from 'sharp'
 import { parseFile as parseAudioFile } from 'music-metadata'
-import { isPsdExt, isReadableTextExt, type MediaType } from '@shared/mediaTypes'
+import { isCadExt, isPsdExt, isReadableTextExt, type MediaType } from '@shared/mediaTypes'
 import type { AssetExtraMeta } from '@shared/types'
 import { probeVideo } from './ffmpeg'
 import { extractPsdMetadata } from './psd'
+import { extractCadHeaderVersion } from './cad'
 
 export interface ExtractedMetadata {
   width: number | null
@@ -124,6 +125,32 @@ export async function extractAssetMetadata(
       return { width: null, height: null, duration: null, extraMeta: null, textSnippet: null }
     } finally {
       if (handle) await handle.close().catch(() => undefined)
+    }
+  }
+
+  if (mediaType === 'model') {
+    const fmt = ext.replace('.', '').toUpperCase()
+    if (isCadExt(ext)) {
+      const cadVersion = await extractCadHeaderVersion(filePath)
+      return {
+        width: null,
+        height: null,
+        duration: null,
+        extraMeta: {
+          format: fmt,
+          cadVersion
+        },
+        textSnippet: null
+      }
+    }
+    return {
+      width: null,
+      height: null,
+      duration: null,
+      extraMeta: {
+        format: fmt
+      },
+      textSnippet: null
     }
   }
 

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import {
   ArrowUpCircle,
   Download,
@@ -18,18 +19,34 @@ export const TitleBar: React.FC = () => {
   const {
     search,
     setSearch,
-    settings,
+    theme,
     updateSettings,
     scanProgress,
     updateState,
-    openSettings,
+    openUpdateModal,
     leftPanelOpen,
     rightPanelOpen,
     toggleLeftPanel,
     toggleRightPanel,
     refreshAll,
     showToast
-  } = useLibraryStore()
+  } = useLibraryStore(
+    useShallow((s) => ({
+      search: s.search,
+      setSearch: s.setSearch,
+      theme: s.settings.theme,
+      updateSettings: s.updateSettings,
+      scanProgress: s.scanProgress,
+      updateState: s.updateState,
+      openUpdateModal: s.openUpdateModal,
+      leftPanelOpen: s.leftPanelOpen,
+      rightPanelOpen: s.rightPanelOpen,
+      toggleLeftPanel: s.toggleLeftPanel,
+      toggleRightPanel: s.toggleRightPanel,
+      refreshAll: s.refreshAll,
+      showToast: s.showToast
+    }))
+  )
 
   const [localSearch, setLocalSearch] = useState(search)
 
@@ -62,9 +79,8 @@ export const TitleBar: React.FC = () => {
 
   return (
     <header
-      className="app-drag-region h-[42px] shrink-0 flex items-center justify-between gap-3 pl-3 pr-[146px] border-b select-none"
+      className="prism-glass-titlebar app-drag-region h-[42px] shrink-0 flex items-center justify-between gap-3 pl-3 pr-[146px] border-b select-none"
       style={{
-        backgroundColor: 'var(--bg-mica)',
         borderColor: 'var(--border-subtle)'
       }}
     >
@@ -93,17 +109,51 @@ export const TitleBar: React.FC = () => {
             </span>
           </div>
         </div>
+
+        {/* Highlighted Blue Update Button beside Brand Name when a new version is detected */}
+        {updateState &&
+          updateState.release &&
+          (updateState.status === 'available' ||
+            updateState.status === 'downloading' ||
+            updateState.status === 'downloaded') && (
+            <button
+              type="button"
+              onClick={openUpdateModal}
+              className="h-6 px-2.5 rounded-full text-white text-xs font-medium flex items-center gap-1.5 cursor-pointer shadow-sm transition-all hover:brightness-110 active:scale-[0.98]"
+              style={{
+                backgroundColor: updateState.status === 'downloaded' ? '#059669' : '#0078d4',
+                boxShadow:
+                  updateState.status === 'downloaded'
+                    ? '0 0 10px rgba(16, 185, 129, 0.4)'
+                    : '0 0 10px rgba(0, 120, 212, 0.45)'
+              }}
+              title={
+                updateState.status === 'downloaded'
+                  ? `PrismVault v${updateState.release.version} 已下载就绪，点击安装`
+                  : updateState.status === 'downloading'
+                    ? `正在下载 PrismVault v${updateState.release.version} (${updateState.download?.percent ?? 0}%)`
+                    : `发现新版本 PrismVault v${updateState.release.version}，点击查看更新详情`
+              }
+            >
+              {updateState.status === 'downloading' ? (
+                <Download className="w-3 h-3 animate-pulse shrink-0" />
+              ) : (
+                <ArrowUpCircle className="w-3.5 h-3.5 shrink-0" />
+              )}
+              <span className="whitespace-nowrap">
+                {updateState.status === 'downloading'
+                  ? `更新中 ${updateState.download?.percent ?? 0}%`
+                  : updateState.status === 'downloaded'
+                    ? `安装 v${updateState.release.version}`
+                    : `有更新 v${updateState.release.version}`}
+              </span>
+            </button>
+          )}
       </div>
 
       {/* Center: Integrated WinUI Search Bar */}
       <div className="app-no-drag flex-1 max-w-xl min-w-[200px] mx-2">
-        <div
-          className="flex items-center gap-2 h-8 px-3 rounded-md border transition-colors focus-within:border-[var(--accent)]"
-          style={{
-            backgroundColor: 'var(--bg-surface)',
-            borderColor: 'var(--border-subtle)'
-          }}
-        >
+        <div className="prism-search-box flex items-center gap-2 h-8 px-3 rounded-lg border">
           <Search className="w-4 h-4 shrink-0" style={{ color: 'var(--text-muted)' }} />
           <input
             type="text"
@@ -131,44 +181,6 @@ export const TitleBar: React.FC = () => {
 
       {/* Right: Quick actions + Right Inspector Toggle (leaving clean room for Win11 caption controls) */}
       <div className="app-no-drag flex items-center gap-1 shrink-0">
-        {updateState &&
-          updateState.release &&
-          (updateState.status === 'available' ||
-            updateState.status === 'downloading' ||
-            updateState.status === 'downloaded') && (
-            <button
-              type="button"
-              onClick={() => openSettings('about')}
-              className="h-7 px-2.5 mr-0.5 rounded-full border flex items-center gap-1.5 text-xs font-medium cursor-pointer transition-colors hover:brightness-110"
-              style={{
-                backgroundColor:
-                  updateState.status === 'downloaded' ? 'rgba(52, 211, 153, 0.14)' : 'var(--bg-active)',
-                borderColor: updateState.status === 'downloaded' ? 'var(--success)' : 'var(--accent)',
-                color: updateState.status === 'downloaded' ? 'var(--success)' : 'var(--accent)'
-              }}
-              title={
-                updateState.status === 'downloaded'
-                  ? `PrismVault v${updateState.release.version} 已下载就绪，点击前往安装`
-                  : updateState.status === 'downloading'
-                    ? `正在下载 PrismVault v${updateState.release.version} (${updateState.download?.percent ?? 0}%)`
-                    : `发现 PrismVault 新版本 v${updateState.release.version}，点击查看更新详情`
-              }
-            >
-              {updateState.status === 'downloading' ? (
-                <Download className="w-3.5 h-3.5 animate-pulse shrink-0" />
-              ) : (
-                <ArrowUpCircle className="w-3.5 h-3.5 shrink-0" />
-              )}
-              <span className="whitespace-nowrap">
-                {updateState.status === 'downloading'
-                  ? `更新 ${updateState.download?.percent ?? 0}%`
-                  : updateState.status === 'downloaded'
-                    ? `安装 v${updateState.release.version}`
-                    : `新版本 v${updateState.release.version}`}
-              </span>
-            </button>
-          )}
-
         <button
           type="button"
           onClick={handleAddSource}
@@ -194,12 +206,12 @@ export const TitleBar: React.FC = () => {
 
         <button
           type="button"
-          onClick={() => updateSettings({ theme: settings.theme === 'dark' ? 'light' : 'dark' })}
+          onClick={() => updateSettings({ theme: theme === 'dark' ? 'light' : 'dark' })}
           className="h-8 w-8 rounded-md flex items-center justify-center hover:bg-[var(--bg-hover)] cursor-pointer transition-colors"
           style={{ color: 'var(--text-secondary)' }}
-          title={settings.theme === 'dark' ? '切换为浅色模式' : '切换为深色模式'}
+          title={theme === 'dark' ? '切换为浅色模式' : '切换为深色模式'}
         >
-          {settings.theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+          {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
         </button>
 
         <button

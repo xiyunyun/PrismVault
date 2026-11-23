@@ -1,6 +1,7 @@
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
-import { app, BrowserWindow, protocol } from 'electron'
+import { app, BrowserWindow, nativeTheme, protocol } from 'electron'
 import { closeDatabase, initDatabase } from './db'
 import { getAllSettings } from './db/repositories'
 import { MEDIA_SCHEME, registerMediaProtocol } from './protocol'
@@ -8,6 +9,36 @@ import { registerIpcHandlers } from './ipc'
 import { watcherManager } from './indexer/watcher'
 import { indexScanner } from './indexer/scanner'
 import { cloudUpdater } from './updater'
+import { cadWorkerPool } from './indexer/cad'
+import type { BackdropStyle } from '@shared/types'
+
+export function isWin11MicaSupported(): boolean {
+  if (process.platform !== 'win32') return false
+  // Electron's setBackgroundMaterial('mica') requires Windows 11 22H2+ (build 22621+)
+  const parts = os.release().split('.')
+  const major = Number(parts[0] ?? 0)
+  const build = Number(parts[2] ?? 0)
+  return major >= 10 && Number.isFinite(build) && build >= 22621
+}
+
+export function resolveEffectiveBackdropStyle(style?: BackdropStyle): BackdropStyle {
+  const candidate = style || 'aurora'
+  if (candidate === 'mica' && !isWin11MicaSupported()) {
+    return 'aurora'
+  }
+  return candidate
+}
+
+function resolveOpaqueWindowBg(theme: 'dark' | 'light', backdropStyle: BackdropStyle): string {
+  const isDark = theme === 'dark'
+  if (backdropStyle === 'solid') {
+    return isDark ? '#202020' : '#f3f3f3'
+  }
+  if (backdropStyle === 'pastel') {
+    return isDark ? '#171a24' : '#f1f5fc'
+  }
+  return isDark ? '#12151f' : '#eef3fc'
+}
 
 // Must be called before app.whenReady()
 protocol.registerSchemesAsPrivileged([
@@ -24,11 +55,26 @@ protocol.registerSchemesAsPrivileged([
   }
 ])
 
-export function syncWindowTitleBarTheme(theme: 'dark' | 'light'): void {
+export function syncWindowAppearance(theme: 'dark' | 'light', backdropStyle: BackdropStyle): void {
   const isDark = theme === 'dark'
+  const effectiveBackdrop = resolveEffectiveBackdropStyle(backdropStyle)
+  const micaCapable = isWin11MicaSupported()
+  nativeTheme.themeSource = theme
+
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) continue
-    win.setBackgroundColor(isDark ? '#202020' : '#f3f3f3')
+    if (micaCapable) {
+      // Keep DWM Mica initialized cleanly from window creation so dynamic CSS switching never turns black
+      if (typeof win.setBackgroundMaterial === 'function') {
+        try {
+          win.setBackgroundMaterial('mica')
+        } catch {
+          // Ignore on unsupported OS builds
+        }
+      }
+    } else {
+      win.setBackgroundColor(resolveOpaqueWindowBg(theme, effectiveBackdrop))
+    }
     if (typeof win.setTitleBarOverlay === 'function') {
       win.setTitleBarOverlay({
         color: '#00000000',
@@ -37,6 +83,11 @@ export function syncWindowTitleBarTheme(theme: 'dark' | 'light'): void {
       })
     }
   }
+}
+
+export function syncWindowTitleBarTheme(theme: 'dark' | 'light'): void {
+  const settings = getAllSettings()
+  syncWindowAppearance(theme, settings.backdropStyle)
 }
 
 function resolveAppIconPath(): string | undefined {
@@ -50,6 +101,9 @@ function resolveAppIconPath(): string | undefined {
 function createMainWindow(): BrowserWindow {
   const settings = getAllSettings()
   const isDark = settings.theme === 'dark'
+  const effectiveBackdrop = resolveEffectiveBackdropStyle(settings.backdropStyle)
+  const micaCapable = isWin11MicaSupported()
+  nativeTheme.themeSource = settings.theme
 
   const win = new BrowserWindow({
     width: 1480,
@@ -58,7 +112,11 @@ function createMainWindow(): BrowserWindow {
     minHeight: 660,
     title: 'PrismVault — 棱镜匣',
     icon: resolveAppIconPath(),
-    backgroundColor: isDark ? '#202020' : '#f3f3f3',
+    // On Win11 22H2+, omit backgroundColor and initialize backgroundMaterial: 'mica' directly so Electron's
+    // DWM Mica compositor stays intact when CSS switches between transparent Mica and opaque themes.
+    ...(micaCapable
+      ? { backgroundMaterial: 'mica' as const }
+      : { backgroundColor: resolveOpaqueWindowBg(settings.theme, effectiveBackdrop) }),
     titleBarStyle: 'hidden',
     titleBarOverlay: {
       color: '#00000000',
@@ -73,6 +131,14 @@ function createMainWindow(): BrowserWindow {
       sandbox: false
     }
   })
+
+  if (micaCapable && typeof win.setBackgroundMaterial === 'function') {
+    try {
+      win.setBackgroundMaterial('mica')
+    } catch {
+      // Ignore on unsupported OS builds
+    }
+  }
 
   if (process.env.ELECTRON_RENDERER_URL) {
     win.loadURL(process.env.ELECTRON_RENDERER_URL)
@@ -116,6 +182,7 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
   watcherManager.stopAll()
+  cadWorkerPool.dispose()
   closeDatabase()
 })
 

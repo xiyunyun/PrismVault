@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import {
   AlertTriangle,
   CopyPlus,
@@ -63,7 +64,12 @@ const PreviewBox: React.FC<{
 }
 
 export const ImportConflictDialog: React.FC = () => {
-  const { importConflictDialog, finishImportConflicts } = useLibraryStore()
+  const { importConflictDialog, finishImportConflicts } = useLibraryStore(
+    useShallow((s) => ({
+      importConflictDialog: s.importConflictDialog,
+      finishImportConflicts: s.finishImportConflicts
+    }))
+  )
 
   const [index, setIndex] = useState(0)
   const [applyToAll, setApplyToAll] = useState(false)

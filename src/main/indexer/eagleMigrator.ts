@@ -260,7 +260,11 @@ export async function migrateFromEagle(
     }
   }
 
-  walkFolders(libMeta.folders, null, [])
+  // Create/reuse ONE top-level Eagle parent group named after the library so imported folders stay cleanly organized
+  const eagleLibraryName = path.basename(eagleDir).replace(/\.library$/i, '').trim() || 'Eagle 素材库'
+  const eagleRootGroupId = findOrCreateGroup(eagleLibraryName, null, '#0ea5e9')
+
+  walkFolders(libMeta.folders, eagleRootGroupId, [])
 
   // 2. Register target directory as an indexed source_root
   const driveRoot = path.parse(targetDir).root.replace(/[\\/]+$/, '')
@@ -406,6 +410,9 @@ export async function migrateFromEagle(
           [assetId],
           matchedGroups.map((g) => g.groupId)
         )
+      } else {
+        // Place uncategorized Eagle items directly under the top-level Eagle library group
+        assignAssetsToGroups([assetId], [eagleRootGroupId])
       }
 
       // Generate OUR OWN lightweight WebP thumbnail asynchronously

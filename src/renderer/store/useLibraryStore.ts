@@ -16,10 +16,13 @@ import type {
   UpdateState
 } from '@shared/types'
 import type { MediaType } from '@shared/mediaTypes'
+import { getChangelogForVersion } from '@shared/changelog'
 import { applyTypographyToDocument } from '../utils/fonts'
 
 const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
+  backdropStyle: 'aurora',
+  backdropMotion: true,
   fontFamily: 'system',
   fontSize: 15,
   viewMode: 'waterfall',
@@ -35,7 +38,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   includeOtherFiles: false,
   autoScanOnStartup: false,
   autoCheckUpdates: true,
-  updateMirrorUrl: ''
+  updateMirrorUrl: '',
+  deleteThumbsOnRemoveSource: true,
+  lastSeenVersion: ''
 }
 
 export interface ConfirmDialogOptions {
@@ -61,7 +66,8 @@ const EMPTY_STATS: LibraryStats = {
   ungroupedCount: 0,
   recentCount: 0,
   missingCount: 0,
-  byType: { image: 0, video: 0, audio: 0, text: 0, other: 0 },
+  hiddenCount: 0,
+  byType: { image: 0, video: 0, audio: 0, text: 0, model: 0, other: 0 },
   byRoot: {}
 }
 
@@ -109,6 +115,8 @@ interface LibraryState {
   // App metadata & Cloud Updater state
   appInfo: AppInfo | null
   updateState: UpdateState | null
+  updateModalOpen: boolean
+  whatsNewOpen: boolean
 
   // Actions
   init: () => Promise<void>
@@ -126,6 +134,7 @@ interface LibraryState {
   resetFilters: () => void
 
   updateSettings: (patch: Partial<AppSettings>) => Promise<void>
+  setCardSizeLocal: (cardSize: number) => void
 
   selectAsset: (id: number, opts?: { ctrl?: boolean; shift?: boolean }) => void
   setSelectedIds: (ids: number[]) => void
@@ -140,7 +149,13 @@ interface LibraryState {
 
   setScanProgress: (progress: ScanProgress) => void
   setUpdateState: (state: UpdateState) => void
+  openUpdateModal: () => void
+  closeUpdateModal: () => void
+  dismissWhatsNew: () => Promise<void>
   patchThumbReady: (payload: { assetId: number; thumbPath: string; width?: number | null; height?: number | null }) => void
+  patchThumbsReadyBatch: (
+    payloads: Array<{ assetId: number; thumbPath: string; width?: number | null; height?: number | null }>
+  ) => void
   updateAssetNoteLocal: (id: number, note: string) => void
   setPlayingAudioId: (id: number | null) => void
   showToast: (text: string, tone?: 'info' | 'success' | 'error') => void
@@ -198,6 +213,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   playingAudioId: null,
   appInfo: null,
   updateState: null,
+  updateModalOpen: false,
+  whatsNewOpen: false,
 
   init: async () => {
     const [settings, appInfo, updateState] = await Promise.all([
@@ -205,9 +222,21 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       window.api.system.getAppInfo(),
       window.api.updater.getState()
     ])
-    document.documentElement.setAttribute('data-theme', settings.theme)
-    applyTypographyToDocument(settings.fontFamily, settings.fontSize)
-    set({ settings, appInfo, updateState, initialized: true })
+    const effectiveBackdrop =
+      settings.backdropStyle === 'mica' && !appInfo.micaSupported ? 'aurora' : settings.backdropStyle || 'aurora'
+    const normalizedSettings =
+      effectiveBackdrop === settings.backdropStyle ? settings : { ...settings, backdropStyle: effectiveBackdrop }
+
+    document.documentElement.setAttribute('data-theme', normalizedSettings.theme)
+    document.documentElement.setAttribute('data-backdrop', normalizedSettings.backdropStyle)
+    document.documentElement.setAttribute('data-motion', normalizedSettings.backdropMotion === false ? 'off' : 'on')
+    applyTypographyToDocument(normalizedSettings.fontFamily, normalizedSettings.fontSize)
+
+    const curVer = appInfo.version.trim().replace(/^[vV]+/, '')
+    const seenVer = (normalizedSettings.lastSeenVersion || '').trim().replace(/^[vV]+/, '')
+    const shouldShowWhatsNew = Boolean(curVer && seenVer !== curVer && getChangelogForVersion(curVer))
+
+    set({ settings: normalizedSettings, appInfo, updateState, whatsNewOpen: shouldShowWhatsNew, initialized: true })
     await get().refreshAll()
   },
 
@@ -311,10 +340,22 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     if (patch.theme !== undefined) {
       document.documentElement.setAttribute('data-theme', next.theme)
     }
+    if (patch.backdropStyle !== undefined) {
+      document.documentElement.setAttribute('data-backdrop', next.backdropStyle)
+    }
+    if (patch.backdropMotion !== undefined) {
+      document.documentElement.setAttribute('data-motion', next.backdropMotion ? 'on' : 'off')
+    }
     if (patch.fontFamily !== undefined || patch.fontSize !== undefined) {
       applyTypographyToDocument(next.fontFamily, next.fontSize)
     }
     set({ settings: next })
+  },
+
+  setCardSizeLocal: (cardSize) => {
+    set((state) =>
+      state.settings.cardSize === cardSize ? state : { settings: { ...state.settings, cardSize } }
+    )
   },
 
   selectAsset: (id, opts) => {
@@ -364,26 +405,51 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   setScanProgress: (scanProgress) => set({ scanProgress }),
   setUpdateState: (updateState) => set({ updateState }),
+  openUpdateModal: () => set({ updateModalOpen: true }),
+  closeUpdateModal: () => set({ updateModalOpen: false }),
+  dismissWhatsNew: async () => {
+    const ver = get().appInfo?.version?.trim().replace(/^[vV]+/, '') || ''
+    set({ whatsNewOpen: false })
+    if (ver) {
+      await get().updateSettings({ lastSeenVersion: ver })
+    }
+  },
 
   patchThumbReady: (payload) => {
-    set((state) => ({
-      assets: state.assets.map((a) =>
-        a.id === payload.assetId
-          ? {
-              ...a,
-              thumbPath: payload.thumbPath,
-              width: payload.width ?? a.width,
-              height: payload.height ?? a.height
-            }
-          : a
-      )
-    }))
+    get().patchThumbsReadyBatch([payload])
+  },
+
+  patchThumbsReadyBatch: (payloads) => {
+    if (payloads.length === 0) return
+    const map = new Map<number, { thumbPath: string; width?: number | null; height?: number | null }>()
+    for (const p of payloads) {
+      map.set(p.assetId, p)
+    }
+    set((state) => {
+      let changed = false
+      const nextAssets = state.assets.map((a) => {
+        const hit = map.get(a.id)
+        if (!hit) return a
+        changed = true
+        return {
+          ...a,
+          thumbPath: hit.thumbPath,
+          width: hit.width ?? a.width,
+          height: hit.height ?? a.height
+        }
+      })
+      return changed ? { assets: nextAssets } : state
+    })
   },
 
   updateAssetNoteLocal: (id, note) => {
-    set((state) => ({
-      assets: state.assets.map((a) => (a.id === id ? { ...a, note } : a))
-    }))
+    set((state) => {
+      const idx = state.assets.findIndex((a) => a.id === id)
+      if (idx === -1 || state.assets[idx].note === note) return state
+      const nextAssets = state.assets.slice()
+      nextAssets[idx] = { ...nextAssets[idx], note }
+      return { assets: nextAssets }
+    })
   },
 
   setPlayingAudioId: (playingAudioId) => set({ playingAudioId }),

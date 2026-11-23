@@ -287,77 +287,150 @@ class IndexScanner {
       missingByFp.set(m.fingerprint, list)
     }
 
-    // Step 3: Process new files — try relinking first, otherwise insert fresh
+    // Step 3: Process new files with bounded concurrency (4x) + batched SQLite transactions
+    const SCAN_BATCH_SIZE = 40
+    const SCAN_CONCURRENCY = 4
     const now = Date.now()
-    for (const item of newFiles) {
-      const size = item.stat.size
-      const mtimeMs = Math.floor(item.stat.mtimeMs)
-      const ctimeMs = Math.floor(item.stat.birthtimeMs || item.stat.ctimeMs)
-      const mediaType = classifyExtension(item.ext)
-      const mimeType = getMimeType(item.ext)
-      const fp = await computeFingerprint(item.filePath, size)
+    let lastEmitAt = 0
 
-      progress.currentFile = item.fileName
-      this.emitProgress({ ...progress })
+    const relinkStmt = db.prepare(
+      `UPDATE assets
+       SET root_id = ?, file_path = ?, file_name = ?, ext = ?, media_type = ?, mime_type = ?,
+           file_size = ?, created_at = ?, modified_at = ?, status = 'active', indexed_at = ?
+       WHERE id = ?`
+    )
+    const insertStmt = db.prepare(
+      `INSERT INTO assets (
+        root_id, file_path, file_name, ext, media_type, mime_type,
+        file_size, created_at, modified_at, fingerprint,
+        width, height, duration, extra_meta, note, thumb_path, text_snippet, status, indexed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', NULL, ?, 'active', ?)`
+    )
 
-      // Attempt fingerprint relink (preserves notes & group memberships!)
-      const candidateList = fp ? missingByFp.get(fp) : undefined
-      const relinkId = candidateList && candidateList.length > 0 ? candidateList.shift() : undefined
+    for (let batchStart = 0; batchStart < newFiles.length; batchStart += SCAN_BATCH_SIZE) {
+      const slice = newFiles.slice(batchStart, batchStart + SCAN_BATCH_SIZE)
 
-      if (relinkId != null) {
-        db.prepare(
-          `UPDATE assets
-           SET root_id = ?, file_path = ?, file_name = ?, ext = ?, media_type = ?, mime_type = ?,
-               file_size = ?, created_at = ?, modified_at = ?, status = 'active', indexed_at = ?
-           WHERE id = ?`
-        ).run(root.id, item.filePath, item.fileName, item.ext, mediaType, mimeType, size, ctimeMs, mtimeMs, now, relinkId)
-        progress.relinked++
-        changed = true
-        continue
+      type PreparedNewFile = {
+        item: (typeof newFiles)[number]
+        mediaType: ReturnType<typeof classifyExtension>
+        mimeType: string
+        fp: string | null
+        relinkId?: number
+        meta: Awaited<ReturnType<typeof extractAssetMetadata>> | null
       }
 
-      // Fresh insert
-      const meta = await extractAssetMetadata(item.filePath, item.ext, mediaType)
-      try {
-        const res = db
-          .prepare(
-            `INSERT INTO assets (
-              root_id, file_path, file_name, ext, media_type, mime_type,
-              file_size, created_at, modified_at, fingerprint,
-              width, height, duration, extra_meta, note, thumb_path, text_snippet, status, indexed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', NULL, ?, 'active', ?)`
-          )
-          .run(
-            root.id,
-            item.filePath,
-            item.fileName,
-            item.ext,
-            mediaType,
-            mimeType,
-            size,
-            ctimeMs,
-            mtimeMs,
-            fp,
-            meta.width,
-            meta.height,
-            meta.duration,
-            meta.extraMeta ? JSON.stringify(meta.extraMeta) : null,
-            meta.textSnippet,
-            now
-          )
-        const newId = Number(res.lastInsertRowid)
-        progress.added++
-        changed = true
+      const prepared: PreparedNewFile[] = new Array(slice.length)
+      let cursor = 0
 
-        thumbnailQueue.enqueue({
-          assetId: newId,
-          filePath: item.filePath,
-          ext: item.ext,
-          mediaType,
-          duration: meta.duration
-        })
-      } catch {
-        // Ignore unique path race condition
+      // Pre-compute fingerprints concurrently (relink candidates skip full metadata re-extraction!)
+      const workers = Array.from({ length: Math.min(SCAN_CONCURRENCY, slice.length) }, async () => {
+        while (true) {
+          const idx = cursor++
+          if (idx >= slice.length) break
+          const item = slice[idx]
+          const size = item.stat.size
+          const mediaType = classifyExtension(item.ext)
+          const mimeType = getMimeType(item.ext)
+          const fp = await computeFingerprint(item.filePath, size)
+
+          // Reserve relink match synchronously on single-threaded JS event loop
+          const candidateList = fp ? missingByFp.get(fp) : undefined
+          const relinkId = candidateList && candidateList.length > 0 ? candidateList.shift() : undefined
+
+          const meta =
+            relinkId == null ? await extractAssetMetadata(item.filePath, item.ext, mediaType) : null
+
+          prepared[idx] = { item, mediaType, mimeType, fp, relinkId, meta }
+        }
+      })
+      await Promise.all(workers)
+
+      const pendingThumbJobs: Array<{
+        assetId: number
+        filePath: string
+        ext: string
+        mediaType: ReturnType<typeof classifyExtension>
+        duration: number | null
+      }> = []
+
+      // Commit the whole batch inside ONE SQLite transaction (10-50x faster than per-row autocommit)
+      db.exec('BEGIN')
+      try {
+        for (const p of prepared) {
+          if (!p) continue
+          const { item, mediaType, mimeType, fp, relinkId, meta } = p
+          const size = item.stat.size
+          const mtimeMs = Math.floor(item.stat.mtimeMs)
+          const ctimeMs = Math.floor(item.stat.birthtimeMs || item.stat.ctimeMs)
+
+          if (relinkId != null) {
+            relinkStmt.run(
+              root.id,
+              item.filePath,
+              item.fileName,
+              item.ext,
+              mediaType,
+              mimeType,
+              size,
+              ctimeMs,
+              mtimeMs,
+              now,
+              relinkId
+            )
+            progress.relinked++
+            changed = true
+            continue
+          }
+
+          try {
+            const res = insertStmt.run(
+              root.id,
+              item.filePath,
+              item.fileName,
+              item.ext,
+              mediaType,
+              mimeType,
+              size,
+              ctimeMs,
+              mtimeMs,
+              fp,
+              meta?.width ?? null,
+              meta?.height ?? null,
+              meta?.duration ?? null,
+              meta?.extraMeta ? JSON.stringify(meta.extraMeta) : null,
+              meta?.textSnippet ?? null,
+              now
+            )
+            const newId = Number(res.lastInsertRowid)
+            progress.added++
+            changed = true
+            pendingThumbJobs.push({
+              assetId: newId,
+              filePath: item.filePath,
+              ext: item.ext,
+              mediaType,
+              duration: meta?.duration ?? null
+            })
+          } catch {
+            // Ignore unique path race condition
+          }
+        }
+        db.exec('COMMIT')
+      } catch (err) {
+        db.exec('ROLLBACK')
+        throw err
+      }
+
+      for (const job of pendingThumbJobs) {
+        thumbnailQueue.enqueue(job)
+      }
+
+      const tNow = Date.now()
+      if (tNow - lastEmitAt >= 80 || batchStart + SCAN_BATCH_SIZE >= newFiles.length) {
+        lastEmitAt = tNow
+        const lastItem = slice[slice.length - 1]
+        if (lastItem) progress.currentFile = lastItem.fileName
+        this.emitProgress({ ...progress })
       }
     }
 

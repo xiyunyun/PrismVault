@@ -2,7 +2,11 @@ node_modules
 out
 dist
 .DS_Store
+Thumbs.db
 *.log
 *.tsbuildinfo
 .vite
+.env
+.env.local
+*.local
 PROJECT_MEMORY.md

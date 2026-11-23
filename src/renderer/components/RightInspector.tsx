@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
+  Box,
   Check,
   Copy,
   Edit3,
@@ -13,6 +15,7 @@ import {
   Film,
   FolderOpen,
   Info,
+  Layers,
   Music,
   Plus,
   StickyNote,
@@ -22,10 +25,12 @@ import {
 } from 'lucide-react'
 import { useLibraryStore } from '../store/useLibraryStore'
 import { flattenGroupTree, getFileMediaUrl, getThumbMediaUrl } from '../utils/mediaUrl'
+import { detectImageTransparency } from './InlinePreview'
 import {
   formatDateTime,
   formatDuration,
   formatFileSize,
+  isCadExt,
   MEDIA_TYPE_LABELS
 } from '@shared/mediaTypes'
 import type { Asset } from '@shared/types'
@@ -46,7 +51,20 @@ export const RightInspector: React.FC<RightInspectorProps> = ({ width }) => {
     refreshAll,
     showToast,
     confirm
-  } = useLibraryStore()
+  } = useLibraryStore(
+    useShallow((s) => ({
+      assets: s.assets,
+      groups: s.groups,
+      stats: s.stats,
+      selectedIds: s.selectedIds,
+      previewAssetId: s.previewAssetId,
+      setPreviewAssetId: s.setPreviewAssetId,
+      updateAssetNoteLocal: s.updateAssetNoteLocal,
+      refreshAll: s.refreshAll,
+      showToast: s.showToast,
+      confirm: s.confirm
+    }))
+  )
 
   const selectedAssets = useMemo(() => {
     if (selectedIds.length === 0) return []
@@ -63,6 +81,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({ width }) => {
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle')
   const [groupPickerOpen, setGroupPickerOpen] = useState(false)
   const [batchNote, setBatchNote] = useState('')
+  const [miniHasAlpha, setMiniHasAlpha] = useState(false)
 
   const activeAssetIdRef = useRef<number | null>(null)
   const pendingNoteRef = useRef<{ id: number; note: string } | null>(null)
@@ -88,6 +107,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({ width }) => {
       setDraftNote(singleAsset?.note ?? '')
       setSaveState('idle')
       setGroupPickerOpen(false)
+      setMiniHasAlpha(false)
     }
   }, [singleAsset?.id])
 
@@ -134,10 +154,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({ width }) => {
   if (selectedAssets.length === 0) {
     return (
       <aside
-        className="shrink-0 h-full border-l flex flex-col p-4 overflow-y-auto"
+        className="prism-glass-sidebar shrink-0 h-full border-l flex flex-col p-4 overflow-y-auto"
         style={{
           width: `${width}px`,
-          backgroundColor: 'var(--bg-sidebar)',
           borderColor: 'var(--border-subtle)'
         }}
       >
@@ -234,10 +253,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({ width }) => {
 
     return (
       <aside
-        className="shrink-0 h-full border-l flex flex-col p-4 overflow-y-auto space-y-5"
+        className="prism-glass-sidebar shrink-0 h-full border-l flex flex-col p-4 overflow-y-auto space-y-5"
         style={{
           width: `${width}px`,
-          backgroundColor: 'var(--bg-sidebar)',
           borderColor: 'var(--border-subtle)'
         }}
       >
@@ -344,19 +362,35 @@ export const RightInspector: React.FC<RightInspectorProps> = ({ width }) => {
         </section>
 
         <section className="pt-3 border-t space-y-2" style={{ borderColor: 'var(--border-subtle)' }}>
-          <button
-            type="button"
-            onClick={async () => {
-              await window.api.assets.setStatus(ids, 'hidden')
-              showToast(`已从库中隐藏 ${ids.length} 项`)
-              await refreshAll()
-            }}
-            className="w-full h-9 rounded-md border text-xs flex items-center justify-center gap-2 hover:bg-[var(--bg-hover)] cursor-pointer"
-            style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
-          >
-            <EyeOff className="w-4 h-4" />
-            <span>从库中批量隐藏（保留原文件）</span>
-          </button>
+          {selectedAssets.every((a) => a.status === 'hidden') ? (
+            <button
+              type="button"
+              onClick={async () => {
+                await window.api.assets.setStatus(ids, 'active')
+                showToast(`已恢复显示 ${ids.length} 项`, 'success')
+                await refreshAll()
+              }}
+              className="w-full h-9 rounded-md border text-xs font-medium flex items-center justify-center gap-2 hover:bg-[var(--bg-hover)] cursor-pointer"
+              style={{ borderColor: 'var(--accent)', color: 'var(--accent)' }}
+            >
+              <Eye className="w-4 h-4" />
+              <span>批量取消隐藏（恢复显示）</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={async () => {
+                await window.api.assets.setStatus(ids, 'hidden')
+                showToast(`已从库中隐藏 ${ids.length} 项（可在左侧「已隐藏」恢复）`)
+                await refreshAll()
+              }}
+              className="w-full h-9 rounded-md border text-xs flex items-center justify-center gap-2 hover:bg-[var(--bg-hover)] cursor-pointer"
+              style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
+            >
+              <EyeOff className="w-4 h-4" />
+              <span>从库中批量隐藏（保留原文件）</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={async () => {
@@ -392,7 +426,15 @@ export const RightInspector: React.FC<RightInspectorProps> = ({ width }) => {
   const renderMiniPreview = () => {
     if (asset.mediaType === 'image') {
       const src = asset.ext === '.svg' || asset.ext === '.gif' ? fileUrl : thumbUrl || fileUrl
-      return <img src={src} alt={asset.fileName} className="w-full h-full object-contain" />
+      return (
+        <img
+          src={src}
+          alt={asset.fileName}
+          crossOrigin="anonymous"
+          onLoad={(e) => setMiniHasAlpha(detectImageTransparency(e.currentTarget, asset.ext))}
+          className={`max-w-full max-h-full w-auto h-auto ${miniHasAlpha ? 'alpha-checkerboard' : ''}`}
+        />
+      )
     }
     if (asset.mediaType === 'video') {
       if (thumbUrl) return <img src={thumbUrl} alt={asset.fileName} className="w-full h-full object-contain" />
@@ -404,6 +446,14 @@ export const RightInspector: React.FC<RightInspectorProps> = ({ width }) => {
     }
     if (asset.mediaType === 'text') {
       return <FileText className="w-10 h-10 text-amber-400" />
+    }
+    if (asset.mediaType === 'model') {
+      if (thumbUrl) return <img src={thumbUrl} alt={asset.fileName} className="w-full h-full object-contain" />
+      return isCadExt(asset.ext) ? (
+        <Layers className="w-10 h-10 text-sky-400" />
+      ) : (
+        <Box className="w-10 h-10 text-orange-400" />
+      )
     }
     return <File className="w-10 h-10 opacity-60" />
   }
@@ -454,13 +504,45 @@ export const RightInspector: React.FC<RightInspectorProps> = ({ width }) => {
   if (asset.extraMeta?.album) {
     metaRows.push({ label: '专辑', value: asset.extraMeta.album })
   }
+  if (asset.extraMeta?.triangleCount != null) {
+    metaRows.push({ label: '三角面数', value: asset.extraMeta.triangleCount.toLocaleString() })
+  }
+  if (asset.extraMeta?.vertexCount != null) {
+    metaRows.push({ label: '顶点数', value: asset.extraMeta.vertexCount.toLocaleString() })
+  }
+  if (asset.extraMeta?.meshCount != null) {
+    const mats = asset.extraMeta.materialCount != null ? ` · ${asset.extraMeta.materialCount} 材质` : ''
+    metaRows.push({ label: '网格 / 材质', value: `${asset.extraMeta.meshCount} 网格${mats}` })
+  }
+  if (asset.extraMeta?.animationCount != null && asset.extraMeta.animationCount > 0) {
+    metaRows.push({ label: '内置动画', value: `${asset.extraMeta.animationCount} 段` })
+  }
+  if (
+    asset.extraMeta?.boundsX != null &&
+    asset.extraMeta?.boundsY != null &&
+    asset.extraMeta?.boundsZ != null
+  ) {
+    metaRows.push({
+      label: '包围盒尺寸',
+      value: `${asset.extraMeta.boundsX} × ${asset.extraMeta.boundsY} × ${asset.extraMeta.boundsZ}`
+    })
+  }
+  if (asset.extraMeta?.cadVersion) {
+    metaRows.push({ label: 'CAD 版本', value: asset.extraMeta.cadVersion })
+  }
+  if (asset.extraMeta?.cadEntityCount != null) {
+    metaRows.push({ label: '矢量图元', value: `${asset.extraMeta.cadEntityCount.toLocaleString()} 个` })
+  }
+  if (asset.extraMeta?.cadLayerCount != null) {
+    const blocks = asset.extraMeta.cadBlockCount ? ` · ${asset.extraMeta.cadBlockCount} 块` : ''
+    metaRows.push({ label: 'CAD 图层', value: `${asset.extraMeta.cadLayerCount} 层${blocks}` })
+  }
 
   return (
     <aside
-      className="shrink-0 h-full border-l flex flex-col overflow-y-auto"
+      className="prism-glass-sidebar shrink-0 h-full border-l flex flex-col overflow-y-auto"
       style={{
         width: `${width}px`,
-        backgroundColor: 'var(--bg-sidebar)',
         borderColor: 'var(--border-subtle)'
       }}
     >
@@ -541,6 +623,22 @@ export const RightInspector: React.FC<RightInspectorProps> = ({ width }) => {
             <span>路径</span>
           </button>
         </div>
+
+        {asset.status === 'hidden' && (
+          <button
+            type="button"
+            onClick={async () => {
+              await window.api.assets.setStatus([asset.id], 'active')
+              showToast('已取消隐藏，素材已恢复到主库中显示', 'success')
+              await refreshAll()
+            }}
+            className="w-full h-8 rounded-md text-xs font-medium text-white flex items-center justify-center gap-1.5 cursor-pointer hover:opacity-95"
+            style={{ backgroundColor: 'var(--accent-solid)' }}
+          >
+            <Eye className="w-3.5 h-3.5" />
+            <span>取消隐藏（恢复到主库显示）</span>
+          </button>
+        )}
       </div>
 
       {/* Markdown Note Section */}

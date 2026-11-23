@@ -1,6 +1,6 @@
 {
   "name": "prismvault",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "PrismVault (棱镜匣) — Cross-drive zero-copy indexed media asset manager",
   "author": "Xiyun (熙云) <1619947679@qq.com>",
   "license": "MIT",
@@ -18,18 +18,22 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "package": "electron-vite build && electron-builder --win"
+    "package": "electron-vite build && electron-builder --win",
+    "release:manifest": "node scripts/generate-update-manifest.mjs"
   },
   "dependencies": {
+    "@mlightcad/libredwg-web": "^0.9.2",
     "ag-psd": "^34.2.2",
     "chokidar": "^4.0.3",
     "clsx": "^2.1.1",
+    "dxf-parser": "^1.1.2",
     "lucide-react": "^0.475.0",
     "music-metadata": "^10.6.4",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "sharp": "^0.33.5",
     "tailwind-merge": "^3.0.1",
+    "three": "^0.187.0",
     "zustand": "^5.0.3"
   },
   "devDependencies": {
@@ -37,6 +41,7 @@
     "@types/node": "^22.13.5",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
+    "@types/three": "^0.187.0",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^35.0.3",
     "electron-builder": "^25.1.8",
@@ -59,6 +64,23 @@
     "files": [
       "out/**/*",
       "resources/icon.png"
+    ],
+    "asarUnpack": [
+      "out/main/cadWorker.js",
+      "out/main/chunks/**/*",
+      "node_modules/@mlightcad/libredwg-web/**/*",
+      "node_modules/dxf-parser/**/*",
+      "node_modules/loglevel/**/*",
+      "node_modules/sharp/**/*",
+      "node_modules/@img/**/*",
+      "node_modules/color/**/*",
+      "node_modules/color-convert/**/*",
+      "node_modules/color-name/**/*",
+      "node_modules/color-string/**/*",
+      "node_modules/simple-swizzle/**/*",
+      "node_modules/is-arrayish/**/*",
+      "node_modules/detect-libc/**/*",
+      "node_modules/semver/**/*"
     ],
     "win": {
       "icon": "resources/icon.ico",

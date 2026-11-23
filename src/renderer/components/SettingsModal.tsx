@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
@@ -13,6 +14,7 @@ import {
   FolderInput,
   FolderOpen,
   FolderPlus,
+  FolderTree,
   Github,
   Globe,
   HardDrive,
@@ -25,6 +27,7 @@ import {
   RefreshCw,
   RotateCcw,
   Scale,
+  Sparkles,
   Sun,
   Trash2,
   Type,
@@ -38,6 +41,7 @@ import { FONT_PRESETS, FONT_SIZE_PRESETS } from '../utils/fonts'
 import { formatDateTime, formatFileSize } from '@shared/mediaTypes'
 import { AppLogo } from './AppLogo'
 import type {
+  BackdropStyle,
   CacheStats,
   ClipboardStats,
   EagleInspectResult,
@@ -57,6 +61,9 @@ const OPEN_SOURCE_DEPS = [
   { name: 'music-metadata', desc: '音频流元数据与封面提取', license: 'MIT', url: 'https://github.com/Borewit/music-metadata' },
   { name: 'chokidar', desc: '轻量级跨平台目录文件监听', license: 'MIT', url: 'https://github.com/paulmillr/chokidar' },
   { name: 'react-markdown', desc: 'Markdown 渲染与 GFM 支持', license: 'MIT', url: 'https://github.com/remarkjs/react-markdown' },
+  { name: 'Three.js', desc: 'WebGL 3D 模型内嵌渲染与离屏缩略图引擎', license: 'MIT', url: 'https://threejs.org' },
+  { name: '@mlightcad/libredwg-web', desc: '基于 GNU LibreDWG 的离线 WASM DWG/DXF 解析引擎', license: 'GPL-3.0', url: 'https://github.com/mlightcad/libredwg-web' },
+  { name: 'dxf-parser', desc: '轻量级纯 JS DXF 图纸解析器', license: 'MIT', url: 'https://github.com/gdsestimating/dxf-parser' },
   { name: 'FFmpeg', desc: '视频抽帧与媒体流元信息解析', license: 'LGPL / GPL', url: 'https://ffmpeg.org' }
 ]
 
@@ -74,7 +81,22 @@ export const SettingsModal: React.FC = () => {
     refreshAll,
     showToast,
     confirm
-  } = useLibraryStore()
+  } = useLibraryStore(
+    useShallow((s) => ({
+      settingsOpen: s.settingsOpen,
+      settingsInitialTab: s.settingsInitialTab,
+      closeSettings: s.closeSettings,
+      settings: s.settings,
+      updateSettings: s.updateSettings,
+      sources: s.sources,
+      appInfo: s.appInfo,
+      updateState: s.updateState,
+      setUpdateState: s.setUpdateState,
+      refreshAll: s.refreshAll,
+      showToast: s.showToast,
+      confirm: s.confirm
+    }))
+  )
 
   const [tab, setTab] = useState<'sources' | 'media' | 'controls' | 'appearance' | 'about'>('sources')
   const [cacheStats, setCacheStats] = useState<CacheStats | null>(null)
@@ -403,6 +425,38 @@ export const SettingsModal: React.FC = () => {
                           <div className="flex items-center gap-1.5 shrink-0">
                             <button
                               type="button"
+                              onClick={async () => {
+                                const ok = await confirm({
+                                  title: '转换为自定义分组结构',
+                                  message: `确定将「${src.alias}」的文件夹层级转换为自定义分组结构吗？`,
+                                  detail:
+                                    '将以该目录作为一级主分组，所有子文件夹按原层级自动生成多级子分组并自动归类素材（不改动硬盘原文件，同名分组自动复用）。',
+                                  confirmText: '立即转换',
+                                  variant: 'info'
+                                })
+                                if (!ok) return
+                                const res = await window.api.sources.convertToGroups(src.id)
+                                if (res.ok) {
+                                  await refreshAll()
+                                  showToast(
+                                    res.createdGroups === 0 && res.assignedAssets === 0
+                                      ? `「${res.rootGroupName}」的分组结构已是最新状态`
+                                      : `已转换「${res.rootGroupName}」：新建 ${res.createdGroups} 个分组，归类 ${res.assignedAssets} 个素材`,
+                                    'success'
+                                  )
+                                } else {
+                                  showToast(res.error || '转换失败', 'error')
+                                }
+                              }}
+                              className="h-8 px-2.5 rounded-md border text-xs flex items-center gap-1.5 hover:bg-[var(--bg-hover)] cursor-pointer"
+                              style={{ borderColor: 'var(--border-subtle)', color: 'var(--accent)' }}
+                              title="按文件夹层级一键生成自定义多级分组"
+                            >
+                              <FolderTree className="w-3.5 h-3.5" />
+                              生成分组
+                            </button>
+                            <button
+                              type="button"
                               onClick={() => {
                                 window.api.sources.scan(src.id)
                                 showToast(`正在扫描「${src.alias}」...`)
@@ -416,16 +470,24 @@ export const SettingsModal: React.FC = () => {
                             <button
                               type="button"
                               onClick={async () => {
+                                const willCleanThumbs = settings.deleteThumbsOnRemoveSource
                                 const ok = await confirm({
                                   title: `移除索引目录「${src.alias}」`,
                                   message: `确定从 PrismVault 中移除索引源「${src.alias}」吗？`,
-                                  detail: '仅移除库内的索引记录以及该目录下文件的备注与分组关联，绝不会删除硬盘上的任何原始文件。',
+                                  detail: willCleanThumbs
+                                    ? '将移除该目录的索引记录、备注与分组关联，并同步清理对应缩略图缓存（可在「媒体与缓存」中关闭）；绝不会删除硬盘上的任何原始文件。'
+                                    : '仅移除该目录的索引记录、备注与分组关联，保留已生成的缩略图缓存（可在「媒体与缓存」中开启自动清理）；绝不会删除硬盘上的任何原始文件。',
                                   confirmText: '确认移除',
                                   variant: 'danger'
                                 })
                                 if (!ok) return
-                                await window.api.sources.remove(src.id)
-                                showToast(`已移除索引目录「${src.alias}」`)
+                                const res = await window.api.sources.remove(src.id)
+                                showToast(
+                                  res && res.removedThumbs > 0
+                                    ? `已移除索引目录「${src.alias}」，并清理 ${res.removedThumbs} 个缩略图缓存`
+                                    : `已移除索引目录「${src.alias}」`
+                                )
+                                await loadSystemStats()
                                 await refreshAll()
                               }}
                               className="h-8 w-8 rounded-md border flex items-center justify-center hover:bg-red-500/15 cursor-pointer"
@@ -646,7 +708,10 @@ export const SettingsModal: React.FC = () => {
                         <span className="font-mono">{formatFileSize(cacheStats.dbBytes)}</span>
                       </div>
                       <div className="pt-1 space-y-1">
-                        <div style={{ color: 'var(--text-secondary)' }}>当前缩略图缓存路径：</div>
+                        <div style={{ color: 'var(--text-secondary)' }}>
+                          当前缩略图缓存路径（3D 模型存放在 <code className="font-mono">models/</code>，CAD 图纸存放在{' '}
+                          <code className="font-mono">cad/</code>）：
+                        </div>
                         <div
                           className="p-2 rounded-md border font-mono break-all select-text"
                           style={{
@@ -743,6 +808,28 @@ export const SettingsModal: React.FC = () => {
                   </div>
 
                   <div
+                    className="pt-3 border-t"
+                    style={{ borderColor: 'var(--border-subtle)' }}
+                  >
+                    <label className="flex items-center justify-between gap-3 text-xs cursor-pointer">
+                      <div>
+                        <div className="font-medium" style={{ color: 'var(--text-primary)' }}>
+                          移除索引目录时同步清理对应缩略图缓存
+                        </div>
+                        <div className="mt-0.5 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                          开启后，删除某个索引源目录会自动清理该目录下素材生成的缩略图与高清预览缓存，避免长期占用磁盘空间；若计划稍后重新挂载同一目录可临时关闭。
+                        </div>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={settings.deleteThumbsOnRemoveSource}
+                        onChange={(e) => updateSettings({ deleteThumbsOnRemoveSource: e.target.checked })}
+                        className="accent-[var(--accent-solid)] w-4 h-4 cursor-pointer shrink-0"
+                      />
+                    </label>
+                  </div>
+
+                  <div
                     className="flex flex-wrap items-center gap-2 pt-3 border-t"
                     style={{ borderColor: 'var(--border-subtle)' }}
                   >
@@ -750,6 +837,15 @@ export const SettingsModal: React.FC = () => {
                       type="button"
                       onClick={async () => {
                         const count = await window.api.settings.rebuildMissingThumbs()
+                        window.api.assets
+                          .getMissingModelThumbs()
+                          .then(async (missingModels) => {
+                            if (missingModels.length === 0) return
+                            const { modelThumbQueue } = await import('../utils/model3d')
+                            modelThumbQueue.resetFailed()
+                            modelThumbQueue.enqueueMany(missingModels)
+                          })
+                          .catch(() => undefined)
                         showToast(`已将 ${count} 个缺失缩略图的素材加入后台生成队列`, 'success')
                       }}
                       className="h-9 px-3.5 rounded-md border text-xs font-medium hover:bg-[var(--bg-hover)] cursor-pointer"
@@ -1109,6 +1205,139 @@ export const SettingsModal: React.FC = () => {
                   </div>
                 </div>
 
+                {/* Backdrop Material & Fluid Ambience */}
+                <div
+                  className="rounded-lg border p-4 space-y-3"
+                  style={{ backgroundColor: 'var(--bg-elevated)', borderColor: 'var(--border-subtle)' }}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-sm font-semibold">
+                      <Sparkles className="w-4 h-4" style={{ color: 'var(--accent)' }} />
+                      <span>背景材质与流体氛围</span>
+                    </div>
+                    <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                      深浅主题均已专属调色
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    {(
+                      [
+                        {
+                          id: 'aurora' as BackdropStyle,
+                          title: '棱镜流光（Prism Aurora）',
+                          badge: '默认推荐',
+                          desc: '多色光学弥散流光 + 磨砂玻璃层次，契合棱镜匣质感',
+                          swatchDark:
+                            'radial-gradient(circle at 20% 25%, #38bdf8 0%, transparent 55%), radial-gradient(circle at 82% 25%, #a855f7 0%, transparent 55%), radial-gradient(circle at 60% 88%, #ec4899 0%, transparent 55%), #121520',
+                          swatchLight:
+                            'radial-gradient(circle at 20% 25%, #7dd3fc 0%, transparent 58%), radial-gradient(circle at 82% 25%, #c4b5fd 0%, transparent 58%), radial-gradient(circle at 60% 88%, #fbcfe8 0%, transparent 58%), #f1f5fc'
+                        },
+                        {
+                          id: 'mica' as BackdropStyle,
+                          title: 'Win11 原生云母（Mica）',
+                          badge: appInfo?.micaSupported ? '跟随壁纸' : '需 Win11 22H2+',
+                          disabled: appInfo ? !appInfo.micaSupported : false,
+                          desc: appInfo?.micaSupported
+                            ? '调用 Windows 11 系统真云母，柔和透出当前桌面壁纸色彩'
+                            : '当前系统不支持原生云母，已自动回退为棱镜流光效果',
+                          swatchDark:
+                            'linear-gradient(135deg, rgba(96,165,250,0.28) 0%, rgba(45,48,60,0.85) 55%, rgba(167,139,250,0.22) 100%)',
+                          swatchLight:
+                            'linear-gradient(135deg, rgba(191,219,254,0.8) 0%, rgba(244,246,252,0.92) 55%, rgba(233,213,255,0.75) 100%)'
+                        },
+                        {
+                          id: 'pastel' as BackdropStyle,
+                          title: '谷歌柔彩（Google Pastel）',
+                          badge: '静态护眼',
+                          desc: '低饱和度静态弥散柔彩底，清透轻盈、零动画开销',
+                          swatchDark:
+                            'linear-gradient(135deg, #161d2f 0%, #1d1a30 50%, #152427 100%)',
+                          swatchLight:
+                            'linear-gradient(135deg, #e0eeff 0%, #f1eaff 50%, #e1f8f0 100%)'
+                        },
+                        {
+                          id: 'solid' as BackdropStyle,
+                          title: '经典纯色（Classic Solid）',
+                          badge: '校色友好',
+                          desc: '标准中性纯灰界面，适合对画面校色有极致要求的场景',
+                          swatchDark: 'linear-gradient(135deg, #202020 0%, #2b2b2b 100%)',
+                          swatchLight: 'linear-gradient(135deg, #f3f3f3 0%, #ffffff 100%)'
+                        }
+                      ] as const
+                    ).map((opt) => {
+                      const isDisabled = 'disabled' in opt && Boolean(opt.disabled)
+                      const active = !isDisabled && (settings.backdropStyle || 'aurora') === opt.id
+                      const swatch = settings.theme === 'dark' ? opt.swatchDark : opt.swatchLight
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          disabled={isDisabled}
+                          onClick={() => {
+                            if (!isDisabled) updateSettings({ backdropStyle: opt.id })
+                          }}
+                          className="p-3 rounded-xl border text-left transition-all flex items-start gap-3 enabled:cursor-pointer enabled:hover:border-[var(--border-strong)] disabled:opacity-55 disabled:cursor-not-allowed"
+                          style={{
+                            backgroundColor: active ? 'var(--bg-active)' : 'var(--bg-surface)',
+                            borderColor: active ? 'var(--accent)' : 'var(--border-subtle)',
+                            boxShadow: active ? '0 0 0 1px var(--accent)' : undefined
+                          }}
+                        >
+                          <span
+                            className="w-10 h-10 rounded-lg shrink-0 border shadow-inner mt-0.5"
+                            style={{
+                              background: swatch,
+                              borderColor: active ? 'var(--accent)' : 'var(--border-strong)'
+                            }}
+                          />
+                          <div className="min-w-0 flex-1 space-y-0.5">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-xs font-semibold" style={{ color: 'var(--text-primary)' }}>
+                                {opt.title}
+                              </span>
+                              <span
+                                className="text-[0.66rem] px-1.5 py-0.2 rounded-full"
+                                style={{
+                                  backgroundColor: active ? 'var(--accent-solid)' : 'var(--bg-elevated)',
+                                  color: active ? '#ffffff' : 'var(--text-muted)'
+                                }}
+                              >
+                                {opt.badge}
+                              </span>
+                            </div>
+                            <div className="text-[0.72rem] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                              {opt.desc}
+                            </div>
+                          </div>
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  {/* Motion toggle */}
+                  <label
+                    className="flex items-center justify-between gap-3 pt-2.5 border-t cursor-pointer"
+                    style={{ borderColor: 'var(--border-subtle)' }}
+                  >
+                    <div className="space-y-0.5">
+                      <div className="text-xs font-medium" style={{ color: 'var(--text-primary)' }}>
+                        开启背景流体呼吸动画（仅棱镜流光生效）
+                      </div>
+                      <div className="text-[0.72rem]" style={{ color: 'var(--text-muted)' }}>
+                        关闭后保持静态极光更省电；进入大图 / 3D / CAD 预览时也会自动暂停动画保障 4K 流畅度
+                      </div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.backdropMotion !== false}
+                      disabled={(settings.backdropStyle || 'aurora') !== 'aurora'}
+                      onChange={(e) => updateSettings({ backdropMotion: e.target.checked })}
+                      className="w-4 h-4 accent-[var(--accent-solid)] cursor-pointer disabled:opacity-45 shrink-0"
+                    />
+                  </label>
+                </div>
+
                 {/* Font Size (4K High-DPI Friendly) */}
                 <div
                   className="rounded-lg border p-4 space-y-3"
@@ -1392,7 +1621,7 @@ export const SettingsModal: React.FC = () => {
                       }}
                     >
                       <RefreshCw className="w-4 h-4 animate-spin shrink-0" style={{ color: 'var(--accent)' }} />
-                      <span>正在连接 GitHub 获取 PrismVault 最新 Release 信息...</span>
+                      <span>正在通过多源加速通道检查 PrismVault 最新版本...</span>
                     </div>
                   )}
 
@@ -1405,12 +1634,20 @@ export const SettingsModal: React.FC = () => {
                         color: 'var(--text-primary)'
                       }}
                     >
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <CheckCircle2 className="w-4 h-4 shrink-0" style={{ color: 'var(--success)' }} />
                         <span>
                           当前已是最新版本 <strong className="font-mono">v{displayVersion}</strong>
                           {updateState.release ? `（云端最新 ${updateState.release.tagName}）` : ''}
                         </span>
+                        {updateState.release?.checkSource && (
+                          <span
+                            className="px-1.5 py-0.5 rounded text-[11px]"
+                            style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--text-muted)' }}
+                          >
+                            通道：{updateState.release.checkSource}
+                          </span>
+                        )}
                       </div>
                       {updateState.checkedAt && (
                         <span className="font-mono" style={{ color: 'var(--text-muted)' }}>
@@ -1616,7 +1853,7 @@ export const SettingsModal: React.FC = () => {
                               />
                             </div>
                             <div className="flex items-center justify-between gap-2 text-xs">
-                              <span className="font-mono tabular-nums" style={{ color: 'var(--text-muted)' }}>
+                              <span className="font-mono tabular-nums truncate" style={{ color: 'var(--text-muted)' }}>
                                 {formatFileSize(updateState.download.transferredBytes)}
                                 {updateState.download.totalBytes > 0
                                   ? ` / ${formatFileSize(updateState.download.totalBytes)}`
@@ -1624,6 +1861,7 @@ export const SettingsModal: React.FC = () => {
                                 {updateState.download.bytesPerSecond > 0
                                   ? ` · ${formatFileSize(updateState.download.bytesPerSecond)}/s`
                                   : ''}
+                                {updateState.download.routeLabel ? ` · ${updateState.download.routeLabel}` : ''}
                               </span>
                               <button
                                 type="button"
@@ -1632,7 +1870,7 @@ export const SettingsModal: React.FC = () => {
                                   setUpdateState(next)
                                   showToast('已取消下载更新')
                                 }}
-                                className="h-7 px-3 rounded-md border text-xs hover:bg-[var(--bg-hover)] cursor-pointer"
+                                className="h-7 px-3 rounded-md border text-xs hover:bg-[var(--bg-hover)] cursor-pointer shrink-0"
                                 style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
                               >
                                 取消下载
@@ -1645,7 +1883,7 @@ export const SettingsModal: React.FC = () => {
                         {updateState.status === 'downloaded' && updateState.download && (
                           <div className="space-y-2.5 pt-0.5">
                             <div
-                              className="flex items-center gap-2 text-xs font-medium"
+                              className="flex items-center gap-2 text-xs font-medium flex-wrap"
                               style={{ color: 'var(--success)' }}
                             >
                               <PackageCheck className="w-4 h-4 shrink-0" />
@@ -1653,6 +1891,25 @@ export const SettingsModal: React.FC = () => {
                                 已下载就绪：{updateState.download.fileName}（
                                 {formatFileSize(updateState.download.totalBytes)}）
                               </span>
+                              {updateState.download.verifiedSha256 && (
+                                <span
+                                  className="px-1.5 py-0.5 rounded text-[11px] font-mono"
+                                  style={{
+                                    backgroundColor: 'rgba(52, 211, 153, 0.14)',
+                                    color: 'var(--success)'
+                                  }}
+                                >
+                                  SHA-256 校验通过
+                                </span>
+                              )}
+                              {updateState.download.routeLabel && (
+                                <span
+                                  className="px-1.5 py-0.5 rounded text-[11px]"
+                                  style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-muted)' }}
+                                >
+                                  {updateState.download.routeLabel}
+                                </span>
+                              )}
                             </div>
                             <div className="flex flex-wrap items-center gap-2">
                               <button
@@ -1720,14 +1977,17 @@ export const SettingsModal: React.FC = () => {
                     <div className="space-y-1.5">
                       <div className="flex items-center gap-1.5 text-xs font-medium" style={{ color: 'var(--text-primary)' }}>
                         <Globe className="w-3.5 h-3.5" style={{ color: 'var(--accent)' }} />
-                        <span>GitHub 下载加速镜像前缀（可选，留空直连）</span>
+                        <span>自定义加速镜像前缀（可选，默认已内置国内自动加速）</span>
+                      </div>
+                      <div className="text-[11px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                        留空时软件会自动从多条国内免代理节点与 GitHub 直连中测速选优，并支持断流自动切线续传与 SHA-256 安全校验；仅在你有专属加速地址时才需手动填写。
                       </div>
                       <div className="flex items-center gap-2">
                         <input
                           type="text"
                           value={mirrorDraft}
                           onChange={(e) => setMirrorDraft(e.target.value)}
-                          placeholder="留空则直连 GitHub（自动遵循系统代理）；可填如 https://ghfast.top/"
+                          placeholder="留空即自动测速选优（无需手动配置）；可填私人镜像如 https://your-proxy.example/"
                           className="flex-1 h-8 px-2.5 rounded-md border text-xs font-mono outline-none select-text focus:border-[var(--accent)]"
                           style={{
                             backgroundColor: 'var(--bg-surface)',
@@ -1749,12 +2009,12 @@ export const SettingsModal: React.FC = () => {
                             onClick={async () => {
                               setMirrorDraft('')
                               await updateSettings({ updateMirrorUrl: '' })
-                              showToast('已恢复直连 GitHub 下载')
+                              showToast('已恢复自动测速优选模式')
                             }}
                             className="h-8 px-2.5 rounded-md text-xs hover:bg-[var(--bg-hover)] cursor-pointer shrink-0"
                             style={{ color: 'var(--text-secondary)' }}
                           >
-                            清空
+                            恢复自动
                           </button>
                         )}
                       </div>

@@ -1,18 +1,31 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { FolderDown } from 'lucide-react'
+import { useShallow } from 'zustand/react/shallow'
 import { TitleBar } from './components/TitleBar'
 import { LeftSidebar } from './components/LeftSidebar'
 import { TopToolbar } from './components/TopToolbar'
 import { AssetCanvas } from './components/AssetCanvas'
 import { InlinePreview } from './components/InlinePreview'
 import { RightInspector } from './components/RightInspector'
-import { SettingsModal } from './components/SettingsModal'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { ImportConflictDialog } from './components/ImportConflictDialog'
+import { UpdateModal, WhatsNewModal } from './components/UpdateModal'
 import { useLibraryStore } from './store/useLibraryStore'
 import { flattenGroupTree } from './utils/mediaUrl'
 import { formatFileSize } from '@shared/mediaTypes'
 import type { ClipboardInspectResult, ConflictResolution } from '@shared/types'
+
+const SettingsModal = React.lazy(() =>
+  import('./components/SettingsModal').then((m) => ({ default: m.SettingsModal }))
+)
+
+async function enqueueMissing3DThumbsLazily(): Promise<void> {
+  const missing = await window.api.assets.getMissingModelThumbs()
+  if (missing.length === 0) return
+  // Only load Three.js bundle into memory when there are actually 3D models lacking thumbnails
+  const { modelThumbQueue } = await import('./utils/model3d')
+  modelThumbQueue.enqueueMany(missing)
+}
 
 export const App: React.FC = () => {
   const {
@@ -20,15 +33,36 @@ export const App: React.FC = () => {
     refreshAll,
     setScanProgress,
     setUpdateState,
-    patchThumbReady,
+    patchThumbsReadyBatch,
     leftPanelOpen,
     rightPanelOpen,
     previewAssetId,
+    settingsOpen,
+    backdropStyle,
+    backdropMotion,
     groupId,
     groups,
     toast,
     showToast
-  } = useLibraryStore()
+  } = useLibraryStore(
+    useShallow((s) => ({
+      init: s.init,
+      refreshAll: s.refreshAll,
+      setScanProgress: s.setScanProgress,
+      setUpdateState: s.setUpdateState,
+      patchThumbsReadyBatch: s.patchThumbsReadyBatch,
+      leftPanelOpen: s.leftPanelOpen,
+      rightPanelOpen: s.rightPanelOpen,
+      previewAssetId: s.previewAssetId,
+      settingsOpen: s.settingsOpen,
+      backdropStyle: s.settings.backdropStyle,
+      backdropMotion: s.settings.backdropMotion,
+      groupId: s.groupId,
+      groups: s.groups,
+      toast: s.toast,
+      showToast: s.showToast
+    }))
+  )
 
   const [leftWidth, setLeftWidth] = useState(268)
   const [rightWidth, setRightWidth] = useState(330)
@@ -126,13 +160,40 @@ export const App: React.FC = () => {
   }, [])
 
   useEffect(() => {
-    init()
+    init().then(() => {
+      // Kick off low-priority background 3D model thumbnail generation only if needed (lazy loads Three.js)
+      setTimeout(() => {
+        enqueueMissing3DThumbsLazily().catch(() => undefined)
+      }, 600)
+    })
 
     let refreshTimer: ReturnType<typeof setTimeout> | null = null
+    let modelThumbTimer: ReturnType<typeof setTimeout> | null = null
+    let thumbBatchTimer: ReturnType<typeof setTimeout> | null = null
+    const pendingThumbs = new Map<
+      number,
+      { assetId: number; thumbPath: string; width?: number | null; height?: number | null }
+    >()
+
+    const flushThumbBatch = () => {
+      thumbBatchTimer = null
+      if (pendingThumbs.size === 0) return
+      const batch = Array.from(pendingThumbs.values())
+      pendingThumbs.clear()
+      patchThumbsReadyBatch(batch)
+    }
+
+    const scheduleModelThumbs = () => {
+      if (modelThumbTimer) clearTimeout(modelThumbTimer)
+      modelThumbTimer = setTimeout(() => {
+        enqueueMissing3DThumbsLazily().catch(() => undefined)
+      }, 800)
+    }
     const scheduleRefresh = () => {
       if (refreshTimer) clearTimeout(refreshTimer)
       refreshTimer = setTimeout(() => {
         refreshAll()
+        scheduleModelThumbs()
       }, 220)
     }
 
@@ -151,7 +212,10 @@ export const App: React.FC = () => {
     })
 
     const unsubThumb = window.api.events.onThumbReady((payload) => {
-      patchThumbReady(payload)
+      pendingThumbs.set(payload.assetId, payload)
+      if (!thumbBatchTimer) {
+        thumbBatchTimer = setTimeout(flushThumbBatch, 140)
+      }
     })
 
     const unsubChanged = window.api.events.onAssetsChanged(() => {
@@ -168,12 +232,14 @@ export const App: React.FC = () => {
         notifiedVersion !== nextState.release.version
       ) {
         notifiedVersion = nextState.release.version
-        showToast(`发现新版本 v${nextState.release.version}，可点击顶栏或「设置 → 关于」查看更新`, 'info')
+        showToast(`发现新版本 v${nextState.release.version}，可点击左上角「有更新」按钮查看详情`, 'info')
       }
     })
 
     return () => {
       if (refreshTimer) clearTimeout(refreshTimer)
+      if (modelThumbTimer) clearTimeout(modelThumbTimer)
+      if (thumbBatchTimer) clearTimeout(thumbBatchTimer)
       unsubProgress()
       unsubThumb()
       unsubChanged()
@@ -189,7 +255,7 @@ export const App: React.FC = () => {
       if (isEditing) return
 
       const state = useLibraryStore.getState()
-      if (state.confirmDialog != null || state.importConflictDialog != null) return
+      if (state.confirmDialog != null || state.importConflictDialog != null || state.updateModalOpen || state.whatsNewOpen) return
       if (state.settingsOpen) {
         if (e.key === 'Escape') state.closeSettings()
         return
@@ -312,6 +378,8 @@ export const App: React.FC = () => {
   }, [])
 
   const isPreviewing = previewAssetId != null
+  const activeBackdrop = backdropStyle || 'aurora'
+  const pauseAmbientMotion = !backdropMotion || isPreviewing
 
   return (
     <div
@@ -319,14 +387,31 @@ export const App: React.FC = () => {
       onDragOver={handleWindowDragOver}
       onDragLeave={handleWindowDragLeave}
       onDrop={handleWindowDrop}
-      className="h-screen w-screen flex flex-col overflow-hidden relative"
-      style={{ backgroundColor: 'var(--bg-mica)' }}
+      className={`h-screen w-screen flex flex-col overflow-hidden relative ${pauseAmbientMotion ? 'prism-motion-paused' : ''}`}
+      style={{ backgroundColor: activeBackdrop === 'mica' ? 'transparent' : 'var(--bg-mica)' }}
     >
+      {/* Ambient Fluid Prism / Pastel Backdrop Layer (zero GPU cost when Mica/Solid/Paused) */}
+      {activeBackdrop === 'aurora' && (
+        <div className="prism-backdrop-layer" aria-hidden="true">
+          <div className="prism-aurora-orb prism-aurora-orb-1" />
+          <div className="prism-aurora-orb prism-aurora-orb-2" />
+          <div className="prism-aurora-orb prism-aurora-orb-3" />
+          <div className="prism-aurora-orb prism-aurora-orb-4" />
+        </div>
+      )}
+      {activeBackdrop === 'pastel' && (
+        <div className="prism-backdrop-layer" aria-hidden="true">
+          <div className="prism-pastel-mesh" />
+        </div>
+      )}
+
       {/* Unified Frameless WinUI 3 TitleBar */}
-      <TitleBar />
+      <div className="relative z-10 shrink-0">
+        <TitleBar />
+      </div>
 
       {/* Unified Full-Height Three-Column Docked Workspace */}
-      <div className="flex-1 flex min-h-0 min-w-0 overflow-hidden">
+      <div className="relative z-10 flex-1 flex min-h-0 min-w-0 overflow-hidden">
         {leftPanelOpen && (
           <>
             <LeftSidebar width={leftWidth} />
@@ -341,10 +426,7 @@ export const App: React.FC = () => {
           </>
         )}
 
-        <div
-          className="flex-1 min-w-0 h-full flex flex-col overflow-hidden"
-          style={{ backgroundColor: 'var(--bg-canvas)' }}
-        >
+        <div className="prism-glass-canvas flex-1 min-w-0 h-full flex flex-col overflow-hidden">
           {!isPreviewing && <TopToolbar />}
           <AssetCanvas hidden={isPreviewing} />
           {isPreviewing && <InlinePreview />}
@@ -405,8 +487,10 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* Settings, Unified Confirm & Conflict Resolution Dialogs */}
-      <SettingsModal />
+      {/* Settings (Lazy-loaded on demand), Update/WhatsNew Modals & Unified Dialogs */}
+      <Suspense fallback={null}>{settingsOpen && <SettingsModal />}</Suspense>
+      <UpdateModal />
+      <WhatsNewModal />
       <ConfirmDialog />
       <ImportConflictDialog />
 

@@ -6,6 +6,14 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve('src/main/index.ts'),
+          cadWorker: resolve('src/main/indexer/cadWorker.ts')
+        }
+      }
+    },
     resolve: {
       alias: {
         '@shared': resolve('src/shared')
@@ -25,6 +33,33 @@ export default defineConfig({
       alias: {
         '@renderer': resolve('src/renderer'),
         '@shared': resolve('src/shared')
+      }
+    },
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes('node_modules/three')) return 'vendor-three'
+            if (
+              id.includes('node_modules/react-markdown') ||
+              id.includes('node_modules/remark-') ||
+              id.includes('node_modules/micromark') ||
+              id.includes('node_modules/mdast') ||
+              id.includes('node_modules/hast') ||
+              id.includes('node_modules/unified')
+            ) {
+              return 'vendor-markdown'
+            }
+            if (
+              id.includes('node_modules/react/') ||
+              id.includes('node_modules/react-dom/') ||
+              id.includes('node_modules/zustand/')
+            ) {
+              return 'vendor-react'
+            }
+            return undefined
+          }
+        }
       }
     },
     plugins: [react(), tailwindcss()]

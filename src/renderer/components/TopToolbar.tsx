@@ -1,4 +1,5 @@
-import React, { useMemo } from 'react'
+import React, { useEffect, useMemo, useRef } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import {
   ArrowDownWideNarrow,
   ArrowUpNarrowWide,
@@ -24,7 +25,8 @@ const SMART_VIEW_TITLES = {
   all: '全部素材',
   ungrouped: '未分类素材',
   recent: '最近添加',
-  missing: '离线 / 失效文件'
+  missing: '离线 / 失效文件',
+  hidden: '已隐藏素材'
 }
 
 export const TopToolbar: React.FC = () => {
@@ -35,13 +37,52 @@ export const TopToolbar: React.FC = () => {
     rootId,
     groups,
     sources,
-    settings,
+    viewMode,
+    gridAspectRatio,
+    gridFitMode,
+    cardSize,
     updateSettings,
+    setCardSizeLocal,
     sortField,
     sortOrder,
     setSort,
     totalAssets
-  } = useLibraryStore()
+  } = useLibraryStore(
+    useShallow((s) => ({
+      smartView: s.smartView,
+      mediaTypes: s.mediaTypes,
+      groupId: s.groupId,
+      rootId: s.rootId,
+      groups: s.groups,
+      sources: s.sources,
+      viewMode: s.settings.viewMode,
+      gridAspectRatio: s.settings.gridAspectRatio,
+      gridFitMode: s.settings.gridFitMode,
+      cardSize: s.settings.cardSize,
+      updateSettings: s.updateSettings,
+      setCardSizeLocal: s.setCardSizeLocal,
+      sortField: s.sortField,
+      sortOrder: s.sortOrder,
+      setSort: s.setSort,
+      totalAssets: s.totalAssets
+    }))
+  )
+
+  const cardSizeSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    return () => {
+      if (cardSizeSaveTimerRef.current) clearTimeout(cardSizeSaveTimerRef.current)
+    }
+  }, [])
+
+  const handleCardSizeChange = (val: number) => {
+    setCardSizeLocal(val)
+    if (cardSizeSaveTimerRef.current) clearTimeout(cardSizeSaveTimerRef.current)
+    cardSizeSaveTimerRef.current = setTimeout(() => {
+      cardSizeSaveTimerRef.current = null
+      updateSettings({ cardSize: val })
+    }, 180)
+  }
 
   const flatGroups = useMemo(() => flattenGroupTree(groups), [groups])
 
@@ -59,9 +100,8 @@ export const TopToolbar: React.FC = () => {
 
   return (
     <div
-      className="min-h-[48px] shrink-0 flex flex-wrap items-center justify-between gap-2.5 px-4 py-1.5 border-b"
+      className="prism-glass-toolbar min-h-[48px] shrink-0 flex flex-wrap items-center justify-between gap-2.5 px-4 py-1.5 border-b"
       style={{
-        backgroundColor: 'var(--bg-canvas)',
         borderColor: 'var(--border-subtle)'
       }}
     >
@@ -98,8 +138,8 @@ export const TopToolbar: React.FC = () => {
             onClick={() => updateSettings({ viewMode: 'waterfall' })}
             className="flex items-center gap-1.5 px-2.5 h-7 rounded text-xs font-medium transition-colors cursor-pointer"
             style={{
-              backgroundColor: settings.viewMode === 'waterfall' ? 'var(--accent-solid)' : 'transparent',
-              color: settings.viewMode === 'waterfall' ? 'var(--accent-text)' : 'var(--text-secondary)'
+              backgroundColor: viewMode === 'waterfall' ? 'var(--accent-solid)' : 'transparent',
+              color: viewMode === 'waterfall' ? 'var(--accent-text)' : 'var(--text-secondary)'
             }}
             title="瀑布流展示（保留原始比例）"
           >
@@ -111,8 +151,8 @@ export const TopToolbar: React.FC = () => {
             onClick={() => updateSettings({ viewMode: 'grid' })}
             className="flex items-center gap-1.5 px-2.5 h-7 rounded text-xs font-medium transition-colors cursor-pointer"
             style={{
-              backgroundColor: settings.viewMode === 'grid' ? 'var(--accent-solid)' : 'transparent',
-              color: settings.viewMode === 'grid' ? 'var(--accent-text)' : 'var(--text-secondary)'
+              backgroundColor: viewMode === 'grid' ? 'var(--accent-solid)' : 'transparent',
+              color: viewMode === 'grid' ? 'var(--accent-text)' : 'var(--text-secondary)'
             }}
             title="等比网格展示（统一比例卡片）"
           >
@@ -122,12 +162,12 @@ export const TopToolbar: React.FC = () => {
         </div>
 
         {/* Grid ratio & fit quick toggles */}
-        {settings.viewMode === 'grid' && (
+        {viewMode === 'grid' && (
           <div className="flex items-center gap-1">
             <button
               type="button"
               onClick={() => {
-                const idx = ASPECT_OPTIONS.indexOf(settings.gridAspectRatio)
+                const idx = ASPECT_OPTIONS.indexOf(gridAspectRatio)
                 const next = ASPECT_OPTIONS[(idx + 1) % ASPECT_OPTIONS.length]
                 updateSettings({ gridAspectRatio: next })
               }}
@@ -139,12 +179,12 @@ export const TopToolbar: React.FC = () => {
               }}
               title="切换等比画布比例 (4:3 / 1:1 / 16:9)"
             >
-              {settings.gridAspectRatio}
+              {gridAspectRatio}
             </button>
             <button
               type="button"
               onClick={() =>
-                updateSettings({ gridFitMode: settings.gridFitMode === 'cover' ? 'contain' : 'cover' })
+                updateSettings({ gridFitMode: gridFitMode === 'cover' ? 'contain' : 'cover' })
               }
               className="h-8 px-2.5 rounded-md text-xs font-medium border hover:bg-[var(--bg-hover)] cursor-pointer"
               style={{
@@ -154,19 +194,19 @@ export const TopToolbar: React.FC = () => {
               }}
               title="切换填充方式：裁剪填满 / 完整留白"
             >
-              {settings.gridFitMode === 'cover' ? '填满' : '完整'}
+              {gridFitMode === 'cover' ? '填满' : '完整'}
             </button>
           </div>
         )}
 
-        {/* Card zoom slider */}
+        {/* Card zoom slider (instant local layout + debounced SQLite persist) */}
         <div
           className="hidden md:flex items-center gap-2 px-2.5 h-8 rounded-md border"
           style={{
             backgroundColor: 'var(--bg-surface)',
             borderColor: 'var(--border-subtle)'
           }}
-          title={`卡片宽度: ${settings.cardSize}px`}
+          title={`卡片宽度: ${cardSize}px`}
         >
           <SlidersHorizontal className="w-3.5 h-3.5" style={{ color: 'var(--text-muted)' }} />
           <input
@@ -174,8 +214,8 @@ export const TopToolbar: React.FC = () => {
             min={150}
             max={360}
             step={10}
-            value={settings.cardSize}
-            onChange={(e) => updateSettings({ cardSize: Number(e.target.value) })}
+            value={cardSize}
+            onChange={(e) => handleCardSizeChange(Number(e.target.value))}
             className="w-20 accent-[var(--accent-solid)] cursor-pointer"
           />
         </div>

@@ -1,17 +1,20 @@
 import React from 'react'
 import {
   AlertTriangle,
+  Box,
+  EyeOff,
   File,
   FileCode2,
   FileText,
   Film,
+  Layers,
   Music,
   Pause,
   Play,
   StickyNote
 } from 'lucide-react'
 import type { Asset, GridFitMode, ViewMode } from '@shared/types'
-import { formatDuration, formatFileSize, isPdfExt, isPsdExt } from '@shared/mediaTypes'
+import { formatDuration, formatFileSize, isCadExt, isPdfExt, isPsdExt } from '@shared/mediaTypes'
 import { getFileMediaUrl, getThumbMediaUrl } from '../utils/mediaUrl'
 
 interface AssetCardProps {
@@ -21,11 +24,11 @@ interface AssetCardProps {
   mediaHeight: number
   selected: boolean
   isPlayingAudio: boolean
-  onSelect: (e: React.MouseEvent) => void
-  onDoubleClick: () => void
-  onContextMenu: (e: React.MouseEvent) => void
-  onDragStart: (e: React.DragEvent) => void
-  onToggleAudioPlay: (e: React.MouseEvent) => void
+  onSelect: (e: React.MouseEvent, asset: Asset) => void
+  onDoubleClick: (asset: Asset) => void
+  onContextMenu: (e: React.MouseEvent, asset: Asset) => void
+  onDragStart: (e: React.DragEvent, asset: Asset) => void
+  onToggleAudioPlay: (e: React.MouseEvent, asset: Asset) => void
 }
 
 export const AssetCard: React.FC<AssetCardProps> = React.memo(
@@ -47,6 +50,7 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(
     const hasNote = Boolean(asset.note && asset.note.trim().length > 0)
     const extBadge = asset.ext ? asset.ext.replace('.', '').toUpperCase() : 'FILE'
     const isMissing = asset.status === 'missing'
+    const isHidden = asset.status === 'hidden'
 
     const imgFitClass =
       viewMode === 'waterfall'
@@ -135,7 +139,7 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(
             <div className="relative z-10 flex flex-col items-center gap-2 text-center max-w-full">
               <button
                 type="button"
-                onClick={onToggleAudioPlay}
+                onClick={(e) => onToggleAudioPlay(e, asset)}
                 className="w-12 h-12 rounded-full flex items-center justify-center shadow-lg transition-transform hover:scale-110 cursor-pointer border border-white/20"
                 style={{
                   backgroundColor: isPlayingAudio ? 'var(--accent-solid)' : 'rgba(20, 20, 20, 0.72)',
@@ -222,6 +226,56 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(
         )
       }
 
+      if (asset.mediaType === 'model') {
+        const isCad = isCadExt(asset.ext)
+        return (
+          <div
+            className="w-full h-full relative flex items-center justify-center overflow-hidden"
+            style={{
+              background: thumbUrl
+                ? isCad
+                  ? '#141923'
+                  : '#1b202b'
+                : isCad
+                  ? 'linear-gradient(145deg, rgba(14, 165, 233, 0.16) 0%, rgba(15, 23, 42, 0.45) 100%)'
+                  : 'linear-gradient(145deg, rgba(251, 146, 60, 0.16) 0%, rgba(30, 41, 59, 0.45) 100%)'
+            }}
+          >
+            {thumbUrl ? (
+              <img
+                src={thumbUrl}
+                alt={asset.fileName}
+                loading="lazy"
+                decoding="async"
+                draggable={false}
+                className={`w-full h-full ${imgFitClass} transition-transform duration-200 group-hover:scale-[1.02]`}
+              />
+            ) : (
+              <div className="flex flex-col items-center gap-2">
+                {isCad ? (
+                  <Layers className="w-10 h-10 text-sky-400 opacity-85" />
+                ) : (
+                  <Box className="w-10 h-10 text-orange-400 opacity-85" />
+                )}
+                <span className="text-xs font-mono opacity-75" style={{ color: 'var(--text-secondary)' }}>
+                  {isCad ? 'CAD 图纸' : '3D 模型'}
+                </span>
+              </div>
+            )}
+            <span
+              className="absolute bottom-2 left-2 px-1.5 py-0.5 rounded text-xs font-bold tracking-wider shadow"
+              style={
+                isCad
+                  ? { backgroundColor: '#0c2340', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.45)' }
+                  : { backgroundColor: '#2c1810', color: '#fb923c', border: '1px solid rgba(251, 146, 60, 0.45)' }
+              }
+            >
+              {extBadge}
+            </span>
+          </div>
+        )
+      }
+
       return (
         <div
           className="w-full h-full flex flex-col items-center justify-center gap-2 p-3"
@@ -241,15 +295,16 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(
     return (
       <div
         draggable
-        onDragStart={onDragStart}
-        onClick={onSelect}
-        onDoubleClick={onDoubleClick}
-        onContextMenu={onContextMenu}
-        className="group h-full w-full rounded-lg overflow-hidden flex flex-col border transition-all cursor-pointer"
+        onDragStart={(e) => onDragStart(e, asset)}
+        onClick={(e) => onSelect(e, asset)}
+        onDoubleClick={() => onDoubleClick(asset)}
+        onContextMenu={(e) => onContextMenu(e, asset)}
+        className={`prism-asset-card group h-full w-full rounded-xl overflow-hidden flex flex-col border cursor-pointer ${
+          selected ? 'prism-asset-card-selected' : ''
+        }`}
         style={{
           backgroundColor: 'var(--bg-surface)',
-          borderColor: selected ? 'var(--accent)' : 'var(--border-subtle)',
-          boxShadow: selected ? '0 0 0 2px var(--accent)' : 'var(--card-shadow)'
+          borderColor: selected ? 'var(--accent)' : 'var(--border-subtle)'
         }}
       >
         {/* Media Viewport */}
@@ -276,6 +331,15 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(
               >
                 <AlertTriangle className="w-3.5 h-3.5" />
                 离线
+              </span>
+            )}
+            {isHidden && (
+              <span
+                className="px-2 h-6 rounded-md bg-neutral-700/90 text-white text-xs font-medium flex items-center gap-1 shadow"
+                title="已从主库隐藏（原文件保留）"
+              >
+                <EyeOff className="w-3.5 h-3.5" />
+                已隐藏
               </span>
             )}
           </div>

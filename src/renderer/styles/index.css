@@ -7,53 +7,183 @@
 
 :root,
 [data-theme="dark"] {
+  --bg-mica: #131620;
+  --bg-sidebar: #1b1f2c;
+  --bg-canvas: #151822;
+  --bg-surface: #232836;
+  --bg-elevated: #2b3142;
+  --bg-hover: rgba(255, 255, 255, 0.072);
+  --bg-active: rgba(96, 205, 255, 0.15);
+  --border-subtle: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --text-primary: #f5f7fb;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
+  --accent: #60cdff;
+  --accent-solid: #0078d4;
+  --accent-solid-hover: #1a86d9;
+  --accent-text: #ffffff;
+  --accent-glow: rgba(96, 205, 255, 0.34);
+  --danger: #ff6b6b;
+  --warning: #fbbf24;
+  --success: #34d399;
+  --card-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+  --card-hover-shadow: 0 10px 26px -8px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(125, 211, 252, 0.26);
+  --card-selected-shadow: 0 0 0 2px var(--accent), 0 10px 26px -8px rgba(96, 205, 255, 0.42);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.17);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.32);
+
+  /* Prism Glass & Group Card Tokens */
+  --glass-titlebar: rgba(20, 24, 36, 0.62);
+  --glass-sidebar: rgba(22, 26, 39, 0.60);
+  --glass-toolbar: rgba(18, 21, 31, 0.58);
+  --glass-canvas: rgba(15, 18, 27, 0.74);
+  --glass-input: rgba(34, 39, 54, 0.68);
+  --glass-pill: rgba(255, 255, 255, 0.048);
+  --glass-highlight: rgba(255, 255, 255, 0.09);
+  --glass-blur: 22px;
+
+  --group-card-bg: rgba(255, 255, 255, 0.042);
+  --group-card-collapsed-bg: rgba(255, 255, 255, 0.025);
+  --group-card-border: rgba(255, 255, 255, 0.095);
+  --group-card-shadow: 0 6px 18px -6px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.075);
+  --tree-guide: rgba(255, 255, 255, 0.12);
+
+  --prism-rail-gradient: linear-gradient(180deg, #38bdf8 0%, #818cf8 55%, #ec4899 100%);
+  --prism-rail-glow: 0 0 10px rgba(96, 205, 255, 0.68);
+}
+
+[data-theme="light"] {
+  --bg-mica: #eef3fc;
+  --bg-sidebar: #f4f7fc;
+  --bg-canvas: #f9fbff;
+  --bg-surface: #ffffff;
+  --bg-elevated: #f1f5fb;
+  --bg-hover: rgba(15, 23, 42, 0.05);
+  --bg-active: rgba(2, 132, 199, 0.11);
+  --border-subtle: rgba(15, 23, 42, 0.085);
+  --border-strong: rgba(15, 23, 42, 0.17);
+  --text-primary: #141925;
+  --text-secondary: #435066;
+  --text-muted: #6e7d95;
+  --accent: #0284c7;
+  --accent-solid: #0067c0;
+  --accent-solid-hover: #005a9e;
+  --accent-text: #ffffff;
+  --accent-glow: rgba(2, 132, 199, 0.28);
+  --danger: #d13438;
+  --warning: #c87b00;
+  --success: #107c10;
+  --card-shadow: 0 2px 6px rgba(15, 23, 42, 0.06);
+  --card-hover-shadow: 0 12px 26px -10px rgba(15, 23, 42, 0.18), 0 0 0 1px rgba(2, 132, 199, 0.24);
+  --card-selected-shadow: 0 0 0 2px var(--accent), 0 10px 24px -8px rgba(2, 132, 199, 0.34);
+  --scrollbar-thumb: rgba(15, 23, 42, 0.18);
+  --scrollbar-thumb-hover: rgba(15, 23, 42, 0.34);
+
+  /* Prism Glass & Group Card Tokens */
+  --glass-titlebar: rgba(255, 255, 255, 0.62);
+  --glass-sidebar: rgba(255, 255, 255, 0.60);
+  --glass-toolbar: rgba(255, 255, 255, 0.62);
+  --glass-canvas: rgba(252, 253, 255, 0.76);
+  --glass-input: rgba(255, 255, 255, 0.78);
+  --glass-pill: rgba(255, 255, 255, 0.68);
+  --glass-highlight: rgba(255, 255, 255, 0.85);
+  --glass-blur: 20px;
+
+  --group-card-bg: rgba(255, 255, 255, 0.74);
+  --group-card-collapsed-bg: rgba(255, 255, 255, 0.45);
+  --group-card-border: rgba(15, 23, 42, 0.085);
+  --group-card-shadow: 0 4px 14px -4px rgba(15, 23, 42, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --tree-guide: rgba(15, 23, 42, 0.13);
+
+  --prism-rail-gradient: linear-gradient(180deg, #0284c7 0%, #6366f1 55%, #db2777 100%);
+  --prism-rail-glow: 0 0 8px rgba(99, 102, 241, 0.45);
+}
+
+/* ==================== Backdrop Mode Overrides ==================== */
+
+/* Mode 2: Windows 11 Native Mica (DWM already blurs desktop wallpaper — NEVER apply CSS backdrop-filter over Mica) */
+[data-backdrop="mica"][data-theme="dark"] {
+  --bg-mica: transparent;
+  --glass-titlebar: rgba(24, 25, 30, 0.14);
+  --glass-sidebar: rgba(28, 30, 36, 0.28);
+  --glass-toolbar: rgba(24, 25, 30, 0.44);
+  --glass-canvas: rgba(20, 21, 26, 0.68);
+  --glass-blur: 0px;
+  --group-card-bg: rgba(255, 255, 255, 0.055);
+  --group-card-collapsed-bg: rgba(255, 255, 255, 0.022);
+}
+
+[data-backdrop="mica"][data-theme="light"] {
+  --bg-mica: transparent;
+  --glass-titlebar: rgba(255, 255, 255, 0.14);
+  --glass-sidebar: rgba(255, 255, 255, 0.34);
+  --glass-toolbar: rgba(255, 255, 255, 0.54);
+  --glass-canvas: rgba(255, 255, 255, 0.74);
+  --glass-blur: 0px;
+  --group-card-bg: rgba(255, 255, 255, 0.78);
+  --group-card-collapsed-bg: rgba(255, 255, 255, 0.40);
+}
+
+/* Mode 3: Google Pastel Static Mesh */
+[data-backdrop="pastel"][data-theme="dark"] {
+  --glass-titlebar: rgba(24, 26, 36, 0.66);
+  --glass-sidebar: rgba(26, 28, 39, 0.64);
+  --glass-toolbar: rgba(21, 23, 32, 0.64);
+  --glass-canvas: rgba(18, 20, 28, 0.78);
+  --glass-blur: 16px;
+}
+
+[data-backdrop="pastel"][data-theme="light"] {
+  --glass-titlebar: rgba(255, 255, 255, 0.66);
+  --glass-sidebar: rgba(255, 255, 255, 0.64);
+  --glass-toolbar: rgba(255, 255, 255, 0.68);
+  --glass-canvas: rgba(253, 254, 255, 0.80);
+  --glass-blur: 16px;
+}
+
+/* Mode 4: Classic Solid Neutral */
+[data-backdrop="solid"][data-theme="dark"] {
   --bg-mica: #202020;
   --bg-sidebar: #232323;
   --bg-canvas: #1a1a1a;
   --bg-surface: #2b2b2b;
   --bg-elevated: #323232;
-  --bg-hover: rgba(255, 255, 255, 0.065);
-  --bg-active: rgba(96, 205, 255, 0.14);
-  --border-subtle: rgba(255, 255, 255, 0.085);
-  --border-strong: rgba(255, 255, 255, 0.18);
-  --text-primary: #f5f5f5;
-  --text-secondary: #cccccc;
-  --text-muted: #949494;
-  --accent: #60cdff;
-  --accent-solid: #0078d4;
-  --accent-solid-hover: #1a86d9;
-  --accent-text: #ffffff;
-  --danger: #ff6b6b;
-  --warning: #fbbf24;
-  --success: #34d399;
-  --card-shadow: 0 2px 6px rgba(0, 0, 0, 0.28);
-  --scrollbar-thumb: rgba(255, 255, 255, 0.16);
-  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.3);
+  --glass-titlebar: #202020;
+  --glass-sidebar: #232323;
+  --glass-toolbar: #1a1a1a;
+  --glass-canvas: #1a1a1a;
+  --glass-input: #2b2b2b;
+  --glass-pill: #2b2b2b;
+  --glass-blur: 0px;
+  --group-card-bg: #292929;
+  --group-card-collapsed-bg: transparent;
 }
 
-[data-theme="light"] {
+[data-backdrop="solid"][data-theme="light"] {
   --bg-mica: #f3f3f3;
   --bg-sidebar: #f6f6f6;
   --bg-canvas: #fafafa;
   --bg-surface: #ffffff;
   --bg-elevated: #efefef;
-  --bg-hover: rgba(0, 0, 0, 0.045);
-  --bg-active: rgba(0, 103, 192, 0.10);
-  --border-subtle: rgba(0, 0, 0, 0.08);
-  --border-strong: rgba(0, 0, 0, 0.18);
-  --text-primary: #1a1a1a;
-  --text-secondary: #4e4e4e;
-  --text-muted: #757575;
-  --accent: #0067c0;
-  --accent-solid: #0067c0;
-  --accent-solid-hover: #005a9e;
-  --accent-text: #ffffff;
-  --danger: #d13438;
-  --warning: #c87b00;
-  --success: #107c10;
-  --card-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
-  --scrollbar-thumb: rgba(0, 0, 0, 0.18);
-  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.34);
+  --glass-titlebar: #f3f3f3;
+  --glass-sidebar: #f6f6f6;
+  --glass-toolbar: #fafafa;
+  --glass-canvas: #fafafa;
+  --glass-input: #ffffff;
+  --glass-pill: #ffffff;
+  --glass-blur: 0px;
+  --group-card-bg: #ffffff;
+  --group-card-collapsed-bg: transparent;
+}
+
+[data-backdrop="mica"] html,
+[data-backdrop="mica"] body,
+[data-backdrop="mica"] #root,
+html[data-backdrop="mica"],
+html[data-backdrop="mica"] body,
+html[data-backdrop="mica"] #root {
+  background-color: transparent !important;
 }
 
 * {
@@ -181,4 +311,262 @@ body,
   border: none;
   border-top: 1px solid var(--border-subtle);
   margin: 0.9em 0;
+}
+
+/* Exact-bounds transparency checkerboard for alpha-channel images (PNG/WebP/PSD/etc.) */
+.alpha-checkerboard {
+  background-color: #2b2f36;
+  background-image:
+    linear-gradient(45deg, #3c424c 25%, transparent 25%),
+    linear-gradient(-45deg, #3c424c 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #3c424c 75%),
+    linear-gradient(-45deg, transparent 75%, #3c424c 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.14), 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+
+[data-theme="light"] .alpha-checkerboard {
+  background-color: #ffffff;
+  background-image:
+    linear-gradient(45deg, #dde1e7 25%, transparent 25%),
+    linear-gradient(-45deg, #dde1e7 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #dde1e7 75%),
+    linear-gradient(-45deg, transparent 75%, #dde1e7 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.14), 0 6px 22px rgba(0, 0, 0, 0.12);
+}
+
+.alpha-backdrop-dark {
+  background-color: #14161a;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.14), 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+
+.alpha-backdrop-light {
+  background-color: #f8fafc;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.14), 0 6px 22px rgba(0, 0, 0, 0.14);
+}
+
+/* ==================== PrismVault Ambient Fluid Backdrop & Glass Surfaces ==================== */
+
+@keyframes prism-drift-a {
+  0%, 100% {
+    transform: translate3d(0%, 0%, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(6%, 5%, 0) scale(1.09);
+  }
+}
+
+@keyframes prism-drift-b {
+  0%, 100% {
+    transform: translate3d(0%, 0%, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(-7%, 6%, 0) scale(1.08);
+  }
+}
+
+@keyframes prism-drift-c {
+  0%, 100% {
+    transform: translate3d(0%, 0%, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(5%, -6%, 0) scale(1.11);
+  }
+}
+
+.prism-backdrop-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+/* Mode 1: Prism Aurora fluid mesh */
+.prism-aurora-orb {
+  position: absolute;
+  border-radius: 9999px;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.prism-aurora-orb-1 {
+  width: 62vmax;
+  height: 62vmax;
+  top: -22vmax;
+  left: -14vmax;
+  background: radial-gradient(circle at center, rgba(56, 189, 248, 0.30) 0%, rgba(59, 130, 246, 0.12) 42%, transparent 72%);
+  animation: prism-drift-a 24s ease-in-out infinite;
+}
+
+.prism-aurora-orb-2 {
+  width: 58vmax;
+  height: 58vmax;
+  top: -18vmax;
+  right: -12vmax;
+  background: radial-gradient(circle at center, rgba(139, 92, 246, 0.28) 0%, rgba(168, 85, 247, 0.11) 42%, transparent 72%);
+  animation: prism-drift-b 28s ease-in-out infinite;
+}
+
+.prism-aurora-orb-3 {
+  width: 54vmax;
+  height: 54vmax;
+  bottom: -24vmax;
+  left: 14vmax;
+  background: radial-gradient(circle at center, rgba(6, 182, 212, 0.22) 0%, rgba(45, 212, 191, 0.08) 44%, transparent 72%);
+  animation: prism-drift-c 30s ease-in-out infinite;
+}
+
+.prism-aurora-orb-4 {
+  width: 52vmax;
+  height: 52vmax;
+  bottom: -20vmax;
+  right: -10vmax;
+  background: radial-gradient(circle at center, rgba(236, 72, 153, 0.20) 0%, rgba(192, 132, 252, 0.08) 44%, transparent 72%);
+  animation: prism-drift-a 34s ease-in-out infinite reverse;
+}
+
+[data-theme="light"] .prism-aurora-orb-1 {
+  background: radial-gradient(circle at center, rgba(56, 189, 248, 0.34) 0%, rgba(125, 211, 252, 0.15) 44%, transparent 72%);
+}
+
+[data-theme="light"] .prism-aurora-orb-2 {
+  background: radial-gradient(circle at center, rgba(167, 139, 250, 0.34) 0%, rgba(196, 181, 253, 0.14) 44%, transparent 72%);
+}
+
+[data-theme="light"] .prism-aurora-orb-3 {
+  background: radial-gradient(circle at center, rgba(45, 212, 191, 0.26) 0%, rgba(153, 246, 228, 0.11) 44%, transparent 72%);
+}
+
+[data-theme="light"] .prism-aurora-orb-4 {
+  background: radial-gradient(circle at center, rgba(244, 114, 182, 0.25) 0%, rgba(251, 207, 232, 0.12) 44%, transparent 72%);
+}
+
+/* Pause fluid animations cleanly when motion is disabled or while previewing heavy media */
+[data-motion="off"] .prism-aurora-orb,
+.prism-motion-paused .prism-aurora-orb {
+  animation-play-state: paused !important;
+}
+
+/* Mode 3: Google Pastel static serene gradient */
+.prism-pastel-mesh {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(65% 60% at 10% 8%, rgba(96, 165, 250, 0.20) 0%, transparent 65%),
+    radial-gradient(58% 58% at 92% 12%, rgba(167, 139, 250, 0.18) 0%, transparent 65%),
+    radial-gradient(60% 55% at 50% 95%, rgba(52, 211, 153, 0.13) 0%, transparent 65%),
+    linear-gradient(135deg, #141824 0%, #181726 52%, #131c24 100%);
+}
+
+[data-theme="light"] .prism-pastel-mesh {
+  background:
+    radial-gradient(65% 60% at 10% 8%, rgba(147, 197, 253, 0.42) 0%, transparent 65%),
+    radial-gradient(58% 58% at 92% 12%, rgba(216, 180, 254, 0.36) 0%, transparent 65%),
+    radial-gradient(60% 55% at 50% 95%, rgba(167, 243, 208, 0.34) 0%, transparent 65%),
+    linear-gradient(135deg, #eef4ff 0%, #f6f2ff 52%, #eefaf6 100%);
+}
+
+/* Frosted Glass Workspace Surfaces */
+.prism-glass-titlebar {
+  background-color: var(--glass-titlebar);
+  backdrop-filter: blur(var(--glass-blur)) saturate(155%);
+  box-shadow: inset 0 -1px 0 var(--border-subtle), inset 0 1px 0 var(--glass-highlight);
+}
+
+.prism-glass-sidebar {
+  background-color: var(--glass-sidebar);
+  backdrop-filter: blur(var(--glass-blur)) saturate(150%);
+}
+
+.prism-glass-toolbar {
+  background-color: var(--glass-toolbar);
+  backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+}
+
+.prism-glass-canvas {
+  background-color: var(--glass-canvas);
+}
+
+[data-backdrop="solid"] .prism-glass-titlebar,
+[data-backdrop="solid"] .prism-glass-sidebar,
+[data-backdrop="solid"] .prism-glass-toolbar {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+}
+
+[data-backdrop="mica"] .prism-glass-titlebar,
+[data-backdrop="mica"] .prism-glass-sidebar,
+[data-backdrop="mica"] .prism-glass-toolbar {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* Luminous Prism Active Indicator Bar */
+.prism-active-bar {
+  background: var(--prism-rail-gradient);
+  box-shadow: var(--prism-rail-glow);
+}
+
+/* Frosted Search Bar Focus Glow */
+.prism-search-box {
+  background-color: var(--glass-input);
+  border-color: var(--border-subtle);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+  transition: border-color 160ms ease, box-shadow 160ms ease, background-color 160ms ease;
+}
+
+.prism-search-box:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow), inset 0 1px 0 var(--glass-highlight);
+}
+
+/* Micro-Glass Nested Group Card Cluster (Option B) */
+.prism-group-card {
+  background-color: var(--group-card-collapsed-bg);
+  border: 1px solid transparent;
+  transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.prism-group-card:hover {
+  border-color: var(--border-subtle);
+}
+
+.prism-group-card-expanded {
+  background-color: var(--group-card-bg);
+  border-color: var(--group-card-border);
+  box-shadow: var(--group-card-shadow);
+}
+
+/* Crystal Media Type Pill */
+.prism-media-pill {
+  background-color: var(--glass-pill);
+  border-color: var(--border-subtle);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+  transition: transform 140ms ease, border-color 160ms ease, box-shadow 160ms ease, background-color 160ms ease;
+}
+
+.prism-media-pill:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong);
+}
+
+/* Asset Card Micro-Glow Hover & Selection */
+.prism-asset-card {
+  box-shadow: var(--card-shadow);
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.prism-asset-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--card-hover-shadow);
+}
+
+.prism-asset-card-selected,
+.prism-asset-card-selected:hover {
+  box-shadow: var(--card-selected-shadow);
 }

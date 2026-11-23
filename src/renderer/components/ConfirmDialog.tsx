@@ -1,9 +1,15 @@
 import React, { useEffect } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { AlertTriangle, Info, Trash2, X } from 'lucide-react'
 import { useLibraryStore } from '../store/useLibraryStore'
 
 export const ConfirmDialog: React.FC = () => {
-  const { confirmDialog, resolveConfirm } = useLibraryStore()
+  const { confirmDialog, resolveConfirm } = useLibraryStore(
+    useShallow((s) => ({
+      confirmDialog: s.confirmDialog,
+      resolveConfirm: s.resolveConfirm
+    }))
+  )
 
   useEffect(() => {
     if (!confirmDialog) return

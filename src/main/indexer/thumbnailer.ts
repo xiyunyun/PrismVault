@@ -2,11 +2,12 @@ import fs from 'fs'
 import path from 'path'
 import sharp from 'sharp'
 import { parseFile as parseAudioFile } from 'music-metadata'
-import { getThumbCacheDir } from '../db'
-import { updateAssetThumbAndDims } from '../db/repositories'
+import { getCadThumbCacheDir, getThumbCacheDir } from '../db'
+import { mergeAssetExtraMeta, updateAssetThumbAndDims } from '../db/repositories'
 import { extractVideoFrame } from './ffmpeg'
 import { renderPsdToWebp } from './psd'
-import { isPsdExt, type MediaType } from '@shared/mediaTypes'
+import { renderCadToWebp } from './cad'
+import { isCadExt, isPsdExt, type MediaType } from '@shared/mediaTypes'
 
 export interface ThumbJob {
   assetId: number
@@ -38,7 +39,8 @@ class ThumbnailQueue {
 
   enqueue(job: ThumbJob): void {
     if (this.queuedIds.has(job.assetId)) return
-    if (job.mediaType !== 'image' && job.mediaType !== 'video' && job.mediaType !== 'audio') return
+    const isSupportedCad = job.mediaType === 'model' && isCadExt(job.ext)
+    if (job.mediaType !== 'image' && job.mediaType !== 'video' && job.mediaType !== 'audio' && !isSupportedCad) return
     this.queuedIds.add(job.assetId)
     this.queue.push(job)
     this.pump()
@@ -65,13 +67,25 @@ class ThumbnailQueue {
 
   private async processJob(job: ThumbJob): Promise<void> {
     if (!fs.existsSync(job.filePath)) return
-    const outFile = path.join(getThumbCacheDir(), `${job.assetId}.webp`)
+    const isCad = job.mediaType === 'model' && isCadExt(job.ext)
+    const outFile = isCad
+      ? path.join(getCadThumbCacheDir(), `${job.assetId}.webp`)
+      : path.join(getThumbCacheDir(), `${job.assetId}.webp`)
+    const thumbRelName = isCad ? `cad/${job.assetId}.webp` : `${job.assetId}.webp`
 
     let generated = false
     let width: number | null | undefined
     let height: number | null | undefined
 
-    if (job.mediaType === 'image') {
+    if (isCad) {
+      const res = await renderCadToWebp(job.filePath, outFile)
+      generated = res.ok && fs.existsSync(outFile)
+      width = res.width
+      height = res.height
+      if (res.meta) {
+        mergeAssetExtraMeta(job.assetId, res.meta)
+      }
+    } else if (job.mediaType === 'image') {
       if (isPsdExt(job.ext)) {
         const res = await renderPsdToWebp(job.filePath, outFile, 480, 720, 82)
         generated = res.ok && fs.existsSync(outFile)
@@ -115,7 +129,6 @@ class ThumbnailQueue {
     }
 
     if (generated) {
-      const thumbRelName = `${job.assetId}.webp`
       updateAssetThumbAndDims(job.assetId, thumbRelName, width, height)
       for (const listener of this.listeners) {
         listener({ assetId: job.assetId, thumbPath: thumbRelName, width, height })

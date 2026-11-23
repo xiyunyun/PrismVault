@@ -4,6 +4,14 @@ export function getFileMediaUrl(assetId: number): string {
   return `xiyun-media://file/${assetId}`
 }
 
+/**
+ * Returns a companion-aware URL (`xiyun-media://asset-<id>/<fileName>`) so Three.js
+ * loaders (OBJ/MTL/FBX/GLTF) can automatically resolve relative `.mtl` and texture files.
+ */
+export function getModelFileMediaUrl(assetId: number, fileName: string): string {
+  return `xiyun-media://asset-${assetId}/${encodeURIComponent(fileName)}`
+}
+
 export function getThumbMediaUrl(thumbPath: string | null | undefined): string | null {
   if (!thumbPath) return null
   return `xiyun-media://thumb/${encodeURIComponent(thumbPath)}`

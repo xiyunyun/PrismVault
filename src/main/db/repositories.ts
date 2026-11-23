@@ -1,3 +1,4 @@
+import path from 'path'
 import { getDb } from './index'
 import type {
   AppSettings,
@@ -6,6 +7,7 @@ import type {
   AssetQueryFilter,
   AssetQueryResult,
   AssetStatus,
+  ConvertSourceToGroupsResult,
   GroupFlat,
   GroupNode,
   LibraryStats,
@@ -25,6 +27,8 @@ export const DEFAULT_IGNORE_PATTERNS = [
 
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
+  backdropStyle: 'aurora',
+  backdropMotion: true,
   fontFamily: 'system',
   fontSize: 15,
   viewMode: 'waterfall',
@@ -40,7 +44,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   includeOtherFiles: false,
   autoScanOnStartup: false,
   autoCheckUpdates: true,
-  updateMirrorUrl: ''
+  updateMirrorUrl: '',
+  deleteThumbsOnRemoveSource: true,
+  lastSeenVersion: ''
 }
 
 const naturalCollator = new Intl.Collator('zh-CN', {
@@ -176,9 +182,141 @@ export function updateSourceRoot(
   return getSourceRootById(id)!
 }
 
+export function getAssetThumbRefsByRootId(rootId: number): Array<{ id: number; thumbPath: string | null }> {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT id, thumb_path FROM assets WHERE root_id = ?')
+    .all(rootId) as Array<{ id: number; thumb_path: string | null }>
+  return rows.map((r) => ({ id: Number(r.id), thumbPath: r.thumb_path }))
+}
+
 export function deleteSourceRoot(id: number): void {
   const db = getDb()
   db.prepare('DELETE FROM source_roots WHERE id = ?').run(id)
+}
+
+const AUTO_GROUP_PALETTE = [
+  '#3b82f6',
+  '#06b6d4',
+  '#10b981',
+  '#8b5cf6',
+  '#f59e0b',
+  '#ec4899',
+  '#6366f1',
+  '#f97316'
+]
+
+/**
+ * Converts an indexed source directory's physical folder tree into an N-level custom group hierarchy:
+ * Root folder name -> level-1 group; nested subfolders -> level-2..N subgroups;
+ * all active assets under that source root are automatically assigned to their folder's group.
+ * Idempotent: reuses existing groups with matching (parent_id, name).
+ */
+export function convertSourceRootToGroups(rootId: number): ConvertSourceToGroupsResult {
+  const root = getSourceRootById(rootId)
+  if (!root) {
+    return {
+      ok: false,
+      rootGroupId: 0,
+      rootGroupName: '',
+      createdGroups: 0,
+      reusedGroups: 0,
+      assignedAssets: 0,
+      error: '未找到对应的索引源目录。'
+    }
+  }
+
+  const db = getDb()
+  const resolvedRoot = path.resolve(root.path)
+  const rawBase = path.basename(resolvedRoot)
+  const rootGroupName = (rawBase && rawBase.trim() ? rawBase.trim() : root.alias.trim()) || '索引目录'
+
+  const assets = db
+    .prepare(`SELECT id, file_path FROM assets WHERE root_id = ? AND status = 'active'`)
+    .all(rootId) as Array<{ id: number; file_path: string }>
+
+  // Pre-load existing groups into an O(1) lookup map so repeated runs never create duplicates
+  const existingGroups = db.prepare('SELECT id, parent_id, name FROM groups').all() as Array<{
+    id: number
+    parent_id: number | null
+    name: string
+  }>
+  const groupKeyMap = new Map<string, number>()
+  const makeKey = (parentId: number | null, name: string) => `${parentId == null ? 'ROOT' : parentId}::${name.trim().toLowerCase()}`
+  for (const g of existingGroups) {
+    groupKeyMap.set(makeKey(g.parent_id != null ? Number(g.parent_id) : null, g.name), Number(g.id))
+  }
+
+  const now = Date.now()
+  const insertGroupStmt = db.prepare(
+    'INSERT INTO groups (parent_id, name, color, sort_order, created_at) VALUES (?, ?, ?, 0, ?)'
+  )
+  const assignStmt = db.prepare('INSERT OR IGNORE INTO asset_groups (asset_id, group_id, created_at) VALUES (?, ?, ?)')
+
+  let createdGroups = 0
+  let reusedGroups = 0
+  let assignedAssets = 0
+  let colorIdx = 0
+  const touchedGroupIds = new Set<number>()
+
+  const ensureGroupInTx = (parentId: number | null, name: string): number => {
+    const cleanName = name.trim() || '未命名文件夹'
+    const key = makeKey(parentId, cleanName)
+    const hit = groupKeyMap.get(key)
+    if (hit !== undefined) {
+      if (!touchedGroupIds.has(hit)) {
+        touchedGroupIds.add(hit)
+        reusedGroups++
+      }
+      return hit
+    }
+    const color = AUTO_GROUP_PALETTE[colorIdx++ % AUTO_GROUP_PALETTE.length]
+    const res = insertGroupStmt.run(parentId, cleanName, color, now)
+    const newId = Number(res.lastInsertRowid)
+    groupKeyMap.set(key, newId)
+    touchedGroupIds.add(newId)
+    createdGroups++
+    return newId
+  }
+
+  let rootGroupId = 0
+
+  db.exec('BEGIN')
+  try {
+    rootGroupId = ensureGroupInTx(null, rootGroupName)
+
+    for (const asset of assets) {
+      const fileDir = path.dirname(path.resolve(asset.file_path))
+      const relDir = path.relative(resolvedRoot, fileDir)
+
+      let targetGroupId = rootGroupId
+      if (relDir && relDir !== '.' && !relDir.startsWith('..') && !path.isAbsolute(relDir)) {
+        const segments = relDir.split(/[\\/]+/).filter((s) => s.length > 0 && s !== '.')
+        for (const seg of segments) {
+          targetGroupId = ensureGroupInTx(targetGroupId, seg)
+        }
+      }
+
+      const r = assignStmt.run(Number(asset.id), targetGroupId, now)
+      if (Number(r.changes) > 0) {
+        assignedAssets++
+      }
+    }
+
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+
+  return {
+    ok: true,
+    rootGroupId,
+    rootGroupName,
+    createdGroups,
+    reusedGroups,
+    assignedAssets
+  }
 }
 
 // ===================== Groups =====================
@@ -221,10 +359,12 @@ export function listGroupsFlat(): GroupFlat[] {
 }
 
 export function listGroupTree(): GroupNode[] {
-  const flat = listGroupsFlat()
   const db = getDb()
+  const rows = db
+    .prepare(`SELECT * FROM groups ORDER BY sort_order ASC, created_at ASC`)
+    .all() as unknown as GroupRow[]
 
-  // Also fetch active asset->group edges so parent totalCount counts unique assets across descendants
+  // Fetch active asset->group edges once to compute both direct assetCount and descendant totalCount
   const edges = db
     .prepare(
       `SELECT ag.group_id, ag.asset_id
@@ -246,8 +386,10 @@ export function listGroupTree(): GroupNode[] {
   }
 
   const nodeMap = new Map<number, GroupNode>()
-  for (const g of flat) {
-    nodeMap.set(g.id, { ...g, totalCount: g.assetCount, children: [] })
+  for (const row of rows) {
+    const g = mapGroupRow(row)
+    const directCount = directAssetsByGroup.get(g.id)?.size ?? 0
+    nodeMap.set(g.id, { ...g, assetCount: directCount, totalCount: directCount, children: [] })
   }
 
   const roots: GroupNode[] = []
@@ -277,13 +419,18 @@ export function listGroupTree(): GroupNode[] {
 }
 
 export function getDescendantGroupIds(groupId: number): number[] {
-  const flat = listGroupsFlat()
+  const db = getDb()
+  const rows = db.prepare('SELECT id, parent_id FROM groups').all() as Array<{
+    id: number
+    parent_id: number | null
+  }>
   const childrenByParent = new Map<number, number[]>()
-  for (const g of flat) {
-    if (g.parentId != null) {
-      const list = childrenByParent.get(g.parentId) ?? []
-      list.push(g.id)
-      childrenByParent.set(g.parentId, list)
+  for (const g of rows) {
+    if (g.parent_id != null) {
+      const pid = Number(g.parent_id)
+      const list = childrenByParent.get(pid) ?? []
+      list.push(Number(g.id))
+      childrenByParent.set(pid, list)
     }
   }
   const result: number[] = []
@@ -494,6 +641,8 @@ export function queryAssets(filter: AssetQueryFilter): AssetQueryResult {
   // Status filter based on smartView
   if (filter.smartView === 'missing') {
     where.push(`a.status = 'missing'`)
+  } else if (filter.smartView === 'hidden') {
+    where.push(`a.status = 'hidden'`)
   } else {
     where.push(`a.status = 'active'`)
   }
@@ -552,14 +701,44 @@ export function queryAssets(filter: AssetQueryFilter): AssetQueryResult {
   }
 
   const sql = `
-    SELECT a.*,
-      (SELECT GROUP_CONCAT(ag.group_id) FROM asset_groups ag WHERE ag.asset_id = a.id) AS group_ids_csv
+    SELECT a.*
     FROM assets a
     ${whereClause}
     ${orderSql}
   `
   const rows = db.prepare(sql).all(...params) as unknown as AssetRow[]
-  const items = rows.map(mapAssetRow)
+
+  // Batch-load asset->group edges once instead of running an N+1 correlated subquery per asset row
+  let groupsByAsset: Map<number, number[]> | null = null
+  if (rows.length > 0) {
+    const edgeRows = db.prepare('SELECT asset_id, group_id FROM asset_groups').all() as Array<{
+      asset_id: number
+      group_id: number
+    }>
+    if (edgeRows.length > 0) {
+      groupsByAsset = new Map<number, number[]>()
+      for (const e of edgeRows) {
+        const aid = Number(e.asset_id)
+        const gid = Number(e.group_id)
+        let list = groupsByAsset.get(aid)
+        if (!list) {
+          list = [gid]
+          groupsByAsset.set(aid, list)
+        } else {
+          list.push(gid)
+        }
+      }
+    }
+  }
+
+  const items = rows.map((row) => {
+    const asset = mapAssetRow(row)
+    if (groupsByAsset) {
+      const gids = groupsByAsset.get(asset.id)
+      if (gids) asset.groupIds = gids
+    }
+    return asset
+  })
 
   // Apply true natural sort in JS when sorting by name (so img_2 < img_10, and Chinese pinyin/locale ordering)
   if (filter.sortField === 'name') {
@@ -574,12 +753,23 @@ export function getLibraryStats(): LibraryStats {
   const db = getDb()
   const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000
 
-  const totalActive = Number(
-    (db.prepare(`SELECT COUNT(*) AS c FROM assets WHERE status = 'active'`).get() as { c: number }).c
-  )
-  const missingCount = Number(
-    (db.prepare(`SELECT COUNT(*) AS c FROM assets WHERE status = 'missing'`).get() as { c: number }).c
-  )
+  // Single aggregated pass for totalActive, missingCount, hiddenCount, and recentCount
+  const summary = db
+    .prepare(
+      `SELECT
+         COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0) AS total_active,
+         COALESCE(SUM(CASE WHEN status = 'missing' THEN 1 ELSE 0 END), 0) AS missing_count,
+         COALESCE(SUM(CASE WHEN status = 'hidden' THEN 1 ELSE 0 END), 0) AS hidden_count,
+         COALESCE(SUM(CASE WHEN status = 'active' AND indexed_at >= ? THEN 1 ELSE 0 END), 0) AS recent_count
+       FROM assets`
+    )
+    .get(sevenDaysAgo) as { total_active: number; missing_count: number; hidden_count: number; recent_count: number }
+
+  const totalActive = Number(summary.total_active ?? 0)
+  const missingCount = Number(summary.missing_count ?? 0)
+  const hiddenCount = Number(summary.hidden_count ?? 0)
+  const recentCount = Number(summary.recent_count ?? 0)
+
   const ungroupedCount = Number(
     (
       db
@@ -591,19 +781,13 @@ export function getLibraryStats(): LibraryStats {
         .get() as { c: number }
     ).c
   )
-  const recentCount = Number(
-    (
-      db
-        .prepare(`SELECT COUNT(*) AS c FROM assets WHERE status = 'active' AND indexed_at >= ?`)
-        .get(sevenDaysAgo) as { c: number }
-    ).c
-  )
 
   const byType: Record<MediaType, number> = {
     image: 0,
     video: 0,
     audio: 0,
     text: 0,
+    model: 0,
     other: 0
   }
   const typeRows = db
@@ -626,6 +810,7 @@ export function getLibraryStats(): LibraryStats {
     ungroupedCount,
     recentCount,
     missingCount,
+    hiddenCount,
     byType,
     byRoot
   }
@@ -724,7 +909,7 @@ export function getAssetsMissingThumbs(): Array<{ id: number; filePath: string; 
     .prepare(
       `SELECT id, file_path, ext, media_type FROM assets
        WHERE status = 'active'
-       AND media_type IN ('image', 'video', 'audio')
+       AND media_type IN ('image', 'video', 'audio', 'model')
        AND (thumb_path IS NULL OR thumb_path = '')`
     )
     .all() as Array<{ id: number; file_path: string; ext: string; media_type: MediaType }>
@@ -734,4 +919,42 @@ export function getAssetsMissingThumbs(): Array<{ id: number; filePath: string; 
     ext: r.ext,
     mediaType: r.media_type
   }))
+}
+
+export function getMissing3DModelThumbs(): Array<{ id: number; filePath: string; fileName: string; ext: string }> {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      `SELECT id, file_path, file_name, ext FROM assets
+       WHERE status = 'active'
+       AND media_type = 'model'
+       AND LOWER(ext) IN ('.obj', '.fbx', '.glb', '.gltf', '.stl', '.ply')
+       AND (thumb_path IS NULL OR thumb_path = '')
+       ORDER BY modified_at DESC`
+    )
+    .all() as Array<{ id: number; file_path: string; file_name: string; ext: string }>
+  return rows.map((r) => ({
+    id: Number(r.id),
+    filePath: r.file_path,
+    fileName: r.file_name,
+    ext: r.ext
+  }))
+}
+
+export function mergeAssetExtraMeta(id: number, patch: Partial<AssetExtraMeta>): void {
+  const db = getDb()
+  const row = db.prepare('SELECT extra_meta FROM assets WHERE id = ?').get(id) as
+    | { extra_meta: string | null }
+    | undefined
+  if (!row) return
+  let existing: AssetExtraMeta = {}
+  if (row.extra_meta) {
+    try {
+      existing = JSON.parse(row.extra_meta)
+    } catch {
+      existing = {}
+    }
+  }
+  const merged = { ...existing, ...patch }
+  db.prepare('UPDATE assets SET extra_meta = ? WHERE id = ?').run(JSON.stringify(merged), id)
 }

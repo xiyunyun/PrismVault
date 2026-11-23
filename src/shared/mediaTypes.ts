@@ -1,4 +1,17 @@
-export type MediaType = 'image' | 'video' | 'audio' | 'text' | 'other'
+export type MediaType = 'image' | 'video' | 'audio' | 'text' | 'model' | 'other'
+
+export const MODEL_3D_EXTS = new Set([
+  '.obj', '.fbx', '.glb', '.gltf', '.stl', '.ply'
+])
+
+export const CAD_EXTS = new Set([
+  '.dwg', '.dxf'
+])
+
+export const MODEL_EXTS = new Set([
+  ...MODEL_3D_EXTS,
+  ...CAD_EXTS
+])
 
 export const IMAGE_EXTS = new Set([
   '.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp',
@@ -77,7 +90,17 @@ export const MIME_MAP: Record<string, string> = {
   '.md': 'text/markdown',
   '.markdown': 'text/markdown',
   '.csv': 'text/csv',
-  '.txt': 'text/plain'
+  '.txt': 'text/plain',
+  // 3D Models & CAD
+  '.obj': 'text/plain',
+  '.mtl': 'text/plain',
+  '.fbx': 'application/octet-stream',
+  '.glb': 'model/gltf-binary',
+  '.gltf': 'model/gltf+json',
+  '.stl': 'model/stl',
+  '.ply': 'application/octet-stream',
+  '.dwg': 'application/acad',
+  '.dxf': 'application/dxf'
 }
 
 export function normalizeExt(ext: string): string {
@@ -91,7 +114,24 @@ export function classifyExtension(ext: string): MediaType {
   if (VIDEO_EXTS.has(e)) return 'video'
   if (AUDIO_EXTS.has(e)) return 'audio'
   if (TEXT_EXTS.has(e)) return 'text'
+  if (MODEL_EXTS.has(e)) return 'model'
   return 'other'
+}
+
+export function is3DModelExt(ext: string): boolean {
+  return MODEL_3D_EXTS.has(normalizeExt(ext))
+}
+
+export function isCadExt(ext: string): boolean {
+  return CAD_EXTS.has(normalizeExt(ext))
+}
+
+export function isDwgExt(ext: string): boolean {
+  return normalizeExt(ext) === '.dwg'
+}
+
+export function isDxfExt(ext: string): boolean {
+  return normalizeExt(ext) === '.dxf'
 }
 
 export function getMimeType(ext: string): string {
@@ -168,5 +208,6 @@ export const MEDIA_TYPE_LABELS: Record<MediaType, string> = {
   video: '视频',
   audio: '音频',
   text: '文本',
+  model: '3D / CAD',
   other: '其他'
 }
