@@ -1,10 +1,10 @@
 {
-  "version": "0.4.0",
-  "tagName": "v0.4.0",
-  "name": "PrismVault v0.4.0",
-  "publishedAt": "2026-11-23T05:30:24.136Z",
-  "htmlUrl": "https://github.com/xiyunyun/PrismVault/releases/tag/v0.4.0",
-  "notes": "### PrismVault v0.4.0 — 系统托盘后台驻留、开机自启与打包版 CAD 预览修复\n\n- **关闭隐藏至系统托盘（默认开启）**：点击关闭按钮自动最小化至右下角托盘后台运行，点击图标瞬间呼出、右键可同步或彻底退出，并支持单实例防多开（可在「设置 → 操作与交互」切换）。\n- **开机自动启动（默认开启）**：打包版自动同步 Windows 登录启动项，配合托盘驻留开机静默进后台不打扰桌面。\n- **修复打包版 DWG / DXF 预览报错**：CAD 工作线程全面自包含打包并独立内置 LibreDWG WASM 内核，彻底解决打包版提示缺少 `dxf-parser` 的问题。",
+  "version": "0.5.0",
+  "tagName": "v0.5.0",
+  "name": "PrismVault v0.5.0",
+  "publishedAt": "2026-11-23T07:12:53.203Z",
+  "htmlUrl": "https://github.com/xiyunyun/PrismVault/releases/tag/v0.5.0",
+  "notes": "### PrismVault v0.5.0 — 原生拖出与极速搜图、多维/按色/格式细筛、重复文件雷达与多图对比\n\n- **素材随取随用**：支持原生向外拖拽至外部软件与桌面、`Ctrl + C` 复制文件 / 右键复制画面，以及可选开启的全局快捷键「极速搜图浮窗」。\n- **精准筛选与格式细分**：新增一键「排除非可识别文件」开关（自动屏蔽 `.dll`/`.exe` 等杂项）；点选素材类型动态展开库内实际拥有的细分格式；新增多维筛选条（按色找图 / 构图 / 体积 / 备注）与 5 色主色调提取。\n- **收藏、重复雷达与分组拖拽**：新增「我的收藏」（`F` 键）、跨盘符「重复文件清理雷达」（无损合并分组/收藏/备注后移至回收站）与自定义分组自由拖拽排序改层级。\n- **预览与对比增强**：新增 2~4 图并排同步对比 & 2 图卷帘对比（`C` 键）、图片吸管取色（`I` 键）、视频悬停静音预览及「当前帧设为封面」。\n- **大库性能与后台体验**：新增 SQLite 增量分页加载、后台缩略图与 3D 封面进度条、3D 封面空闲渲染调度，以及托盘常驻定时静默检查更新。",
   "mirrors": [
     "https://ghfast.top/",
     "https://gh-proxy.com/",
@@ -13,16 +13,16 @@
   ],
   "assets": {
     "installer": {
-      "name": "PrismVault.Setup.0.4.0.exe",
-      "size": 107692888,
-      "sha256": "33700d6e324d70ea1a5212fad17bcfa173c591856f06ace2c0471dcaf75bb7fd",
-      "downloadUrl": "https://github.com/xiyunyun/PrismVault/releases/download/v0.4.0/PrismVault.Setup.0.4.0.exe"
+      "name": "PrismVault.Setup.0.5.0.exe",
+      "size": 107715869,
+      "sha256": "369e8b89970b1fef16f72d174f9ea8fadf14a890c6668b5237ea155862351788",
+      "downloadUrl": "https://github.com/xiyunyun/PrismVault/releases/download/v0.5.0/PrismVault.Setup.0.5.0.exe"
     },
     "portable": {
-      "name": "PrismVault-0.4.0-win.zip",
-      "size": 145909908,
-      "sha256": "eb814299b68aba9de08615c8ceb4da9aafecee517237baf18bb815a449179f32",
-      "downloadUrl": "https://github.com/xiyunyun/PrismVault/releases/download/v0.4.0/PrismVault-0.4.0-win.zip"
+      "name": "PrismVault-0.5.0-win.zip",
+      "size": 145940896,
+      "sha256": "ddf03c6a60068708930b65dc74a76136f989c359cd4ba286281fd7c182b87c40",
+      "downloadUrl": "https://github.com/xiyunyun/PrismVault/releases/download/v0.5.0/PrismVault-0.5.0-win.zip"
     }
   }
 }

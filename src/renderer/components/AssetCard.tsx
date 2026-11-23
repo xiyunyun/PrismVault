@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import {
   AlertTriangle,
   Box,
@@ -7,6 +7,7 @@ import {
   FileCode2,
   FileText,
   Film,
+  Heart,
   Layers,
   Music,
   Pause,
@@ -24,11 +25,13 @@ interface AssetCardProps {
   mediaHeight: number
   selected: boolean
   isPlayingAudio: boolean
+  videoHoverPreview: boolean
   onSelect: (e: React.MouseEvent, asset: Asset) => void
   onDoubleClick: (asset: Asset) => void
   onContextMenu: (e: React.MouseEvent, asset: Asset) => void
   onDragStart: (e: React.DragEvent, asset: Asset) => void
   onToggleAudioPlay: (e: React.MouseEvent, asset: Asset) => void
+  onToggleFavorite: (e: React.MouseEvent, asset: Asset) => void
 }
 
 export const AssetCard: React.FC<AssetCardProps> = React.memo(
@@ -39,11 +42,13 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(
     mediaHeight,
     selected,
     isPlayingAudio,
+    videoHoverPreview,
     onSelect,
     onDoubleClick,
     onContextMenu,
     onDragStart,
-    onToggleAudioPlay
+    onToggleAudioPlay,
+    onToggleFavorite
   }) => {
     const thumbUrl = getThumbMediaUrl(asset.thumbPath)
     const fileUrl = getFileMediaUrl(asset.id)
@@ -51,6 +56,35 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(
     const extBadge = asset.ext ? asset.ext.replace('.', '').toUpperCase() : 'FILE'
     const isMissing = asset.status === 'missing'
     const isHidden = asset.status === 'hidden'
+
+    const [hoverPlayingVideo, setHoverPlayingVideo] = useState(false)
+    const [videoProgress, setVideoProgress] = useState(0)
+    const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+    useEffect(() => {
+      return () => {
+        if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current)
+      }
+    }, [])
+
+    const handleVideoMouseEnter = () => {
+      if (!videoHoverPreview || asset.mediaType !== 'video' || isMissing) return
+      if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current)
+      hoverTimerRef.current = setTimeout(() => {
+        setHoverPlayingVideo(true)
+      }, 320)
+    }
+
+    const handleVideoMouseLeave = () => {
+      if (hoverTimerRef.current) {
+        clearTimeout(hoverTimerRef.current)
+        hoverTimerRef.current = null
+      }
+      if (hoverPlayingVideo) {
+        setHoverPlayingVideo(false)
+        setVideoProgress(0)
+      }
+    }
 
     const imgFitClass =
       viewMode === 'waterfall'
@@ -87,29 +121,61 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(
 
       if (asset.mediaType === 'video') {
         return (
-          <div className="w-full h-full relative flex items-center justify-center bg-[#101010]">
-            {thumbUrl ? (
-              <img
-                src={thumbUrl}
-                alt={asset.fileName}
-                loading="lazy"
-                decoding="async"
-                draggable={false}
-                className={`w-full h-full ${imgFitClass} transition-transform duration-200 group-hover:scale-[1.02]`}
-              />
+          <div
+            onMouseEnter={handleVideoMouseEnter}
+            onMouseLeave={handleVideoMouseLeave}
+            className="w-full h-full relative flex items-center justify-center bg-[#101010]"
+          >
+            {hoverPlayingVideo ? (
+              <>
+                <video
+                  src={fileUrl}
+                  autoPlay
+                  muted
+                  loop
+                  playsInline
+                  onTimeUpdate={(e) => {
+                    const v = e.currentTarget
+                    if (v.duration && Number.isFinite(v.duration) && v.duration > 0) {
+                      setVideoProgress(Math.min(100, (v.currentTime / v.duration) * 100))
+                    }
+                  }}
+                  onError={() => setHoverPlayingVideo(false)}
+                  className={`w-full h-full ${imgFitClass}`}
+                />
+                <div className="absolute bottom-0 left-0 right-0 h-[3px] bg-black/50 pointer-events-none">
+                  <div
+                    className="h-full transition-[width] duration-150"
+                    style={{ width: `${videoProgress}%`, backgroundColor: 'var(--accent)' }}
+                  />
+                </div>
+              </>
             ) : (
-              <div className="flex flex-col items-center gap-1.5 text-neutral-400">
-                <Film className="w-9 h-9 opacity-70" />
-                <span className="text-xs font-mono uppercase opacity-80">{extBadge}</span>
-              </div>
+              <>
+                {thumbUrl ? (
+                  <img
+                    src={thumbUrl}
+                    alt={asset.fileName}
+                    loading="lazy"
+                    decoding="async"
+                    draggable={false}
+                    className={`w-full h-full ${imgFitClass} transition-transform duration-200 group-hover:scale-[1.02]`}
+                  />
+                ) : (
+                  <div className="flex flex-col items-center gap-1.5 text-neutral-400">
+                    <Film className="w-9 h-9 opacity-70" />
+                    <span className="text-xs font-mono uppercase opacity-80">{extBadge}</span>
+                  </div>
+                )}
+                <div className="absolute inset-0 flex items-center justify-center bg-black/15 group-hover:bg-black/30 transition-colors">
+                  <div className="w-10 h-10 rounded-full bg-black/60 backdrop-blur-xs border border-white/20 flex items-center justify-center text-white shadow-lg group-hover:scale-110 transition-transform">
+                    <Play className="w-4 h-4 fill-white ml-0.5" />
+                  </div>
+                </div>
+              </>
             )}
-            <div className="absolute inset-0 flex items-center justify-center bg-black/15 group-hover:bg-black/30 transition-colors">
-              <div className="w-10 h-10 rounded-full bg-black/60 backdrop-blur-xs border border-white/20 flex items-center justify-center text-white shadow-lg group-hover:scale-110 transition-transform">
-                <Play className="w-4 h-4 fill-white ml-0.5" />
-              </div>
-            </div>
             {asset.duration != null && (
-              <span className="absolute bottom-2 right-2 px-1.5 py-0.5 rounded bg-black/75 text-white text-xs font-mono tabular-nums">
+              <span className="absolute bottom-2 right-2 px-1.5 py-0.5 rounded bg-black/75 text-white text-xs font-mono tabular-nums pointer-events-none">
                 {formatDuration(asset.duration)}
               </span>
             )}
@@ -314,8 +380,20 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(
         >
           {renderMediaPreview()}
 
-          {/* Top-right badges */}
+          {/* Top-right badges & Quick Favorite Heart */}
           <div className="absolute top-2 right-2 z-10 flex items-center gap-1">
+            <button
+              type="button"
+              onClick={(e) => onToggleFavorite(e, asset)}
+              className={`w-6 h-6 rounded-md flex items-center justify-center shadow transition-opacity cursor-pointer ${
+                asset.isFavorite
+                  ? 'opacity-100 bg-rose-500/90 text-white'
+                  : 'opacity-0 group-hover:opacity-100 bg-black/55 text-white/90 hover:bg-rose-500/85'
+              }`}
+              title={asset.isFavorite ? '取消收藏 (F)' : '收藏此素材 (F)'}
+            >
+              <Heart className={`w-3.5 h-3.5 ${asset.isFavorite ? 'fill-white' : ''}`} />
+            </button>
             {hasNote && (
               <span
                 className="w-6 h-6 rounded-md bg-amber-500/90 text-white flex items-center justify-center shadow"

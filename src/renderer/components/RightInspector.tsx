@@ -14,9 +14,11 @@ import {
   FileText,
   Film,
   FolderOpen,
+  Heart,
   Info,
   Layers,
   Music,
+  Palette,
   Plus,
   StickyNote,
   Tag,
@@ -47,6 +49,8 @@ export const RightInspector: React.FC<RightInspectorProps> = ({ width }) => {
     selectedIds,
     previewAssetId,
     setPreviewAssetId,
+    toggleFavorite,
+    setColorHex,
     updateAssetNoteLocal,
     refreshAll,
     showToast,
@@ -59,6 +63,8 @@ export const RightInspector: React.FC<RightInspectorProps> = ({ width }) => {
       selectedIds: s.selectedIds,
       previewAssetId: s.previewAssetId,
       setPreviewAssetId: s.setPreviewAssetId,
+      toggleFavorite: s.toggleFavorite,
+      setColorHex: s.setColorHex,
       updateAssetNoteLocal: s.updateAssetNoteLocal,
       refreshAll: s.refreshAll,
       showToast: s.showToast,
@@ -568,12 +574,63 @@ export const RightInspector: React.FC<RightInspectorProps> = ({ width }) => {
           </div>
         )}
 
-        <div
-          className="text-sm font-semibold break-all leading-snug select-text"
-          style={{ color: 'var(--text-primary)' }}
-        >
-          {asset.fileName}
+        <div className="flex items-start justify-between gap-2">
+          <div
+            className="text-sm font-semibold break-all leading-snug select-text flex-1"
+            style={{ color: 'var(--text-primary)' }}
+          >
+            {asset.fileName}
+          </div>
+          <button
+            type="button"
+            onClick={() => toggleFavorite([asset.id])}
+            className="p-1.5 rounded-lg border hover:bg-[var(--bg-hover)] cursor-pointer shrink-0 transition-colors"
+            style={{
+              backgroundColor: asset.isFavorite ? 'rgba(244, 63, 94, 0.14)' : 'var(--bg-surface)',
+              borderColor: asset.isFavorite ? 'rgba(244, 63, 94, 0.45)' : 'var(--border-subtle)',
+              color: asset.isFavorite ? '#f43f5e' : 'var(--text-muted)'
+            }}
+            title={asset.isFavorite ? '取消收藏 (F)' : '添加到我的收藏 (F)'}
+          >
+            <Heart className={`w-4 h-4 ${asset.isFavorite ? 'fill-rose-500' : ''}`} />
+          </button>
         </div>
+
+        {/* Dominant Color Palette Swatches (Click to copy HEX, Shift/Right-click to filter similar colors) */}
+        {asset.dominantColors && asset.dominantColors.length > 0 && (
+          <div className="space-y-1.5 pt-0.5">
+            <div className="flex items-center justify-between text-[0.72rem]" style={{ color: 'var(--text-muted)' }}>
+              <span className="flex items-center gap-1">
+                <Palette className="w-3 h-3" />
+                主色调板
+              </span>
+              <span>点复制 · 右键找同色</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              {asset.dominantColors.map((hex) => (
+                <button
+                  key={hex}
+                  type="button"
+                  onClick={async () => {
+                    await window.api.system.copyPath(hex.toUpperCase())
+                    showToast(`已复制色值 ${hex.toUpperCase()}`, 'success')
+                  }}
+                  onContextMenu={(e) => {
+                    e.preventDefault()
+                    setColorHex(hex)
+                    showToast(`正在筛选接近 ${hex.toUpperCase()} 色调的素材`, 'info')
+                  }}
+                  className="flex-1 h-6 rounded-md border cursor-pointer transition-transform hover:scale-105"
+                  style={{
+                    backgroundColor: hex,
+                    borderColor: 'rgba(128,128,128,0.35)'
+                  }}
+                  title={`${hex.toUpperCase()}（左键复制色值，右键按此色筛选素材）`}
+                />
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Quick action buttons */}
         <div className="grid grid-cols-3 gap-1.5">

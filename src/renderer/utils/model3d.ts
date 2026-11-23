@@ -6,7 +6,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js'
 import { getModelFileMediaUrl } from './mediaUrl'
-import type { AssetExtraMeta, MissingModelThumbItem } from '@shared/types'
+import type { AssetExtraMeta, MissingModelThumbItem, ThumbProgress } from '@shared/types'
 
 export interface LoadedModelResult {
   root: THREE.Group
@@ -269,13 +269,51 @@ export function createStudioLights(scene: THREE.Scene): void {
  * Background sequential 3D thumbnail renderer using a single shared offscreen WebGLRenderer.
  * Renders missing 3D model thumbnails and persists them via IPC into `<thumbCacheDir>/models/<id>.webp`.
  */
+function waitIdleSlot(): Promise<void> {
+  return new Promise((resolve) => {
+    const ric = (window as unknown as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number })
+      .requestIdleCallback
+    if (typeof ric === 'function') {
+      ric(() => setTimeout(resolve, 60), { timeout: 350 })
+    } else {
+      setTimeout(resolve, 110)
+    }
+  })
+}
+
 class ModelThumbQueue {
   private queue: MissingModelThumbItem[] = []
   private seenIds = new Set<number>()
   private failedIds = new Set<number>()
   private running = false
+  private batchTotal = 0
+  private batchCompleted = 0
   private renderer: THREE.WebGLRenderer | null = null
   private idleDisposeTimer: ReturnType<typeof setTimeout> | null = null
+  private progressListeners = new Set<(p: ThumbProgress) => void>()
+
+  onProgress(listener: (p: ThumbProgress) => void): () => void {
+    this.progressListeners.add(listener)
+    return () => this.progressListeners.delete(listener)
+  }
+
+  private emitProgress(): void {
+    const pending = this.queue.length + (this.running ? 1 : 0)
+    const isActive = this.running || this.queue.length > 0
+    const payload: ThumbProgress = isActive
+      ? {
+          running: true,
+          completed: this.batchCompleted,
+          total: Math.max(this.batchTotal, this.batchCompleted + pending),
+          pending
+        }
+      : { running: false, completed: 0, total: 0, pending: 0 }
+    if (!isActive) {
+      this.batchTotal = 0
+      this.batchCompleted = 0
+    }
+    for (const cb of this.progressListeners) cb(payload)
+  }
 
   async enqueueMissingFromDb(): Promise<void> {
     try {
@@ -292,10 +330,14 @@ class ModelThumbQueue {
       if (this.seenIds.has(item.id) || this.failedIds.has(item.id)) continue
       this.seenIds.add(item.id)
       this.queue.push(item)
+      this.batchTotal++
       added = true
     }
-    if (added && !this.running) {
-      this.pump().catch(() => undefined)
+    if (added) {
+      this.emitProgress()
+      if (!this.running) {
+        this.pump().catch(() => undefined)
+      }
     }
   }
 
@@ -339,6 +381,7 @@ class ModelThumbQueue {
   private async pump(): Promise<void> {
     if (this.running) return
     this.running = true
+    this.emitProgress()
 
     try {
       while (this.queue.length > 0) {
@@ -349,12 +392,15 @@ class ModelThumbQueue {
           this.failedIds.add(item.id)
         } finally {
           this.seenIds.delete(item.id)
+          this.batchCompleted++
+          this.emitProgress()
         }
-        // Yield briefly so UI remains completely smooth
-        await new Promise((r) => setTimeout(r, 90))
+        // Low-priority idle yield so foreground 4K scrolling & preview stay silky smooth
+        await waitIdleSlot()
       }
     } finally {
       this.running = false
+      this.emitProgress()
       this.scheduleDispose()
     }
   }

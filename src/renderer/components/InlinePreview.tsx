@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm'
 import {
   AlertCircle,
   ArrowLeft,
+  Camera,
   ChevronLeft,
   ChevronRight,
   Code,
@@ -13,8 +14,10 @@ import {
   Eye,
   File,
   FolderOpen,
+  Heart,
   Maximize2,
   Music,
+  Pipette,
   RefreshCw,
   RotateCcw,
   RotateCw,
@@ -101,6 +104,8 @@ const ImageStage: React.FC<{
   fileUrl: string
   wheelMode: 'zoom' | 'navigate'
   alphaBackdrop: AlphaBackdropMode
+  eyedropperActive: boolean
+  onPickColor: (hex: string, rgb: string) => void
   onAlphaDetected: (hasAlpha: boolean) => void
   onNavigateWheel: (dir: -1 | 1) => void
   onZoomDisplayChange: (scale: number) => void
@@ -110,6 +115,8 @@ const ImageStage: React.FC<{
   fileUrl,
   wheelMode,
   alphaBackdrop,
+  eyedropperActive,
+  onPickColor,
   onAlphaDetected,
   onNavigateWheel,
   onZoomDisplayChange,
@@ -117,7 +124,73 @@ const ImageStage: React.FC<{
 }) => {
   const stageRef = useRef<HTMLDivElement>(null)
   const imgRef = useRef<HTMLImageElement>(null)
+  const eyedropperCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const tfRef = useRef<TransformState>({ scale: 1, x: 0, y: 0, rotation: 0 })
+  const [eyedropperSample, setEyedropperSample] = useState<{
+    x: number
+    y: number
+    hex: string
+    rgb: string
+  } | null>(null)
+
+  useEffect(() => {
+    eyedropperCanvasRef.current = null
+    setEyedropperSample(null)
+  }, [asset.id])
+
+  const samplePixelAtClientPoint = useCallback((clientX: number, clientY: number) => {
+    const img = imgRef.current
+    const stage = stageRef.current
+    if (!img || !stage || !img.naturalWidth || !img.naturalHeight) return null
+    const rect = img.getBoundingClientRect()
+    if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+      return null
+    }
+    try {
+      let canvas = eyedropperCanvasRef.current
+      if (!canvas) {
+        canvas = document.createElement('canvas')
+        canvas.width = img.naturalWidth
+        canvas.height = img.naturalHeight
+        const ctx = canvas.getContext('2d', { willReadFrequently: true })
+        if (!ctx) return null
+        ctx.drawImage(img, 0, 0)
+        eyedropperCanvasRef.current = canvas
+      }
+      const ctx = canvas.getContext('2d', { willReadFrequently: true })
+      if (!ctx) return null
+
+      // Account for 90-degree cumulative rotation cleanly
+      const rot = (((tfRef.current.rotation % 360) + 360) % 360)
+      const u = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)))
+      const v = Math.max(0, Math.min(1, (clientY - rect.top) / Math.max(1, rect.height)))
+      let nu = u
+      let nv = v
+      if (rot === 90) {
+        nu = v
+        nv = 1 - u
+      } else if (rot === 180) {
+        nu = 1 - u
+        nv = 1 - v
+      } else if (rot === 270) {
+        nu = 1 - v
+        nv = u
+      }
+      const px = Math.min(canvas.width - 1, Math.max(0, Math.floor(nu * canvas.width)))
+      const py = Math.min(canvas.height - 1, Math.max(0, Math.floor(nv * canvas.height)))
+      const [r, g, b] = ctx.getImageData(px, py, 1, 1).data
+      const hex = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`.toUpperCase()
+      const stageRect = stage.getBoundingClientRect()
+      return {
+        x: clientX - stageRect.left,
+        y: clientY - stageRect.top,
+        hex,
+        rgb: `rgb(${r}, ${g}, ${b})`
+      }
+    } catch {
+      return null
+    }
+  }, [])
   const rafRef = useRef<number | null>(null)
   const wheelModeRef = useRef(wheelMode)
   const onNavRef = useRef(onNavigateWheel)
@@ -335,17 +408,34 @@ const ImageStage: React.FC<{
   return (
     <div
       ref={stageRef}
-      onDoubleClick={handleDoubleClick}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      onPointerCancel={handlePointerUp}
+      onDoubleClick={eyedropperActive ? undefined : handleDoubleClick}
+      onPointerDown={(e) => {
+        if (eyedropperActive) {
+          e.preventDefault()
+          const sample = samplePixelAtClientPoint(e.clientX, e.clientY)
+          if (sample) onPickColor(sample.hex, sample.rgb)
+          return
+        }
+        handlePointerDown(e)
+      }}
+      onPointerMove={(e) => {
+        if (eyedropperActive) {
+          setEyedropperSample(samplePixelAtClientPoint(e.clientX, e.clientY))
+          return
+        }
+        handlePointerMove(e)
+      }}
+      onPointerUp={eyedropperActive ? undefined : handlePointerUp}
+      onPointerCancel={eyedropperActive ? undefined : handlePointerUp}
+      onPointerLeave={() => {
+        if (eyedropperActive) setEyedropperSample(null)
+      }}
       className="w-full h-full flex items-center justify-center overflow-hidden relative select-none"
       style={{
-        cursor: canPan ? (isDragging ? 'grabbing' : 'grab') : 'zoom-in',
+        cursor: eyedropperActive ? 'crosshair' : canPan ? (isDragging ? 'grabbing' : 'grab') : 'zoom-in',
         touchAction: 'none'
       }}
-      title={wheelHint}
+      title={eyedropperActive ? '取色吸管模式：点击画面任意像素复制 HEX 色值（按 I 或 Esc 退出）' : wheelHint}
     >
       <img
         ref={imgRef}
@@ -356,6 +446,7 @@ const ImageStage: React.FC<{
         draggable={false}
         decoding="async"
         onLoad={(e) => {
+          eyedropperCanvasRef.current = null
           const detected = detectImageTransparency(e.currentTarget, asset.ext)
           setHasAlpha(detected)
           onAlphaDetected(detected)
@@ -374,24 +465,56 @@ const ImageStage: React.FC<{
           transformOrigin: 'center center'
         }}
       />
+
+      {/* Floating Eyedropper Pixel Swatch Readout */}
+      {eyedropperActive && eyedropperSample && (
+        <div
+          className="pointer-events-none absolute z-30 flex items-center gap-2 px-2.5 py-1.5 rounded-lg border shadow-xl text-xs font-mono"
+          style={{
+            left: `${Math.min(eyedropperSample.x + 18, (stageRef.current?.clientWidth ?? 600) - 180)}px`,
+            top: `${Math.max(12, eyedropperSample.y - 44)}px`,
+            backgroundColor: 'rgba(16, 18, 26, 0.92)',
+            borderColor: 'rgba(255,255,255,0.22)',
+            color: '#f8fafc'
+          }}
+        >
+          <span
+            className="w-5 h-5 rounded border border-white/40 shrink-0"
+            style={{ backgroundColor: eyedropperSample.hex }}
+          />
+          <div className="leading-tight">
+            <div className="font-semibold">{eyedropperSample.hex}</div>
+            <div className="text-[0.65rem] text-neutral-300">{eyedropperSample.rgb}</div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
 // ===================== Main Integrated Inline Preview Pane =====================
 export const InlinePreview: React.FC = () => {
-  const { assets, previewWheelMode, previewAssetId, setPreviewAssetId, selectAsset, refreshAssets, showToast } =
-    useLibraryStore(
-      useShallow((s) => ({
-        assets: s.assets,
-        previewWheelMode: s.settings.previewWheelMode,
-        previewAssetId: s.previewAssetId,
-        setPreviewAssetId: s.setPreviewAssetId,
-        selectAsset: s.selectAsset,
-        refreshAssets: s.refreshAssets,
-        showToast: s.showToast
-      }))
-    )
+  const {
+    assets,
+    previewWheelMode,
+    previewAssetId,
+    setPreviewAssetId,
+    selectAsset,
+    toggleFavorite,
+    refreshAssets,
+    showToast
+  } = useLibraryStore(
+    useShallow((s) => ({
+      assets: s.assets,
+      previewWheelMode: s.settings.previewWheelMode,
+      previewAssetId: s.previewAssetId,
+      setPreviewAssetId: s.setPreviewAssetId,
+      selectAsset: s.selectAsset,
+      toggleFavorite: s.toggleFavorite,
+      refreshAssets: s.refreshAssets,
+      showToast: s.showToast
+    }))
+  )
 
   const currentIndex = useMemo(
     () => (previewAssetId != null ? assets.findIndex((a) => a.id === previewAssetId) : -1),
@@ -401,6 +524,7 @@ export const InlinePreview: React.FC = () => {
 
   const imageControlRef = useRef<ImageControlHandle | null>(null)
   const stageContainerRef = useRef<HTMLDivElement>(null)
+  const videoElRef = useRef<HTMLVideoElement>(null)
   const lastWheelNavRef = useRef(0)
 
   // Edge floating navigation buttons with 2-second auto-fade
@@ -414,6 +538,8 @@ export const InlinePreview: React.FC = () => {
   const [zoomScale, setZoomScale] = useState(1)
   const [imageHasAlpha, setImageHasAlpha] = useState(false)
   const [alphaBackdrop, setAlphaBackdrop] = useState<AlphaBackdropMode>('checkerboard')
+  const [eyedropperActive, setEyedropperActive] = useState(false)
+  const [capturingVideoCover, setCapturingVideoCover] = useState(false)
   const [videoError, setVideoError] = useState(false)
   const [textData, setTextData] = useState<TextContentResult | null>(null)
   const [textLoading, setTextLoading] = useState(false)
@@ -555,6 +681,10 @@ export const InlinePreview: React.FC = () => {
       if (isEditing) return
 
       if (e.key === 'Escape') {
+        if (eyedropperActive) {
+          setEyedropperActive(false)
+          return
+        }
         setPreviewAssetId(null)
       } else if (e.key === 'ArrowLeft') {
         e.preventDefault()
@@ -562,6 +692,12 @@ export const InlinePreview: React.FC = () => {
       } else if (e.key === 'ArrowRight') {
         e.preventDefault()
         goNext()
+      } else if (e.key.toLowerCase() === 'f' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault()
+        toggleFavorite([asset.id])
+      } else if (asset.mediaType === 'image' && e.key.toLowerCase() === 'i' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault()
+        setEyedropperActive((v) => !v)
       } else if (asset.mediaType === 'image' && (e.key === '+' || e.key === '=')) {
         imageControlRef.current?.zoomStep(1)
       } else if (asset.mediaType === 'image' && e.key === '-') {
@@ -572,7 +708,39 @@ export const InlinePreview: React.FC = () => {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [asset, goPrev, goNext, setPreviewAssetId])
+  }, [asset, eyedropperActive, goPrev, goNext, setPreviewAssetId, toggleFavorite])
+
+  const handleCaptureVideoCover = async () => {
+    const vid = videoElRef.current
+    if (!asset || !vid || capturingVideoCover) return
+    if (!vid.videoWidth || !vid.videoHeight) {
+      showToast('视频画面尚未加载完成，请稍后再试', 'error')
+      return
+    }
+    setCapturingVideoCover(true)
+    try {
+      const canvas = document.createElement('canvas')
+      const maxDim = 720
+      const scale = Math.min(1, maxDim / Math.max(vid.videoWidth, vid.videoHeight))
+      canvas.width = Math.max(1, Math.round(vid.videoWidth * scale))
+      canvas.height = Math.max(1, Math.round(vid.videoHeight * scale))
+      const ctx = canvas.getContext('2d')
+      if (!ctx) throw new Error('canvas context unavailable')
+      ctx.drawImage(vid, 0, 0, canvas.width, canvas.height)
+      const dataUrl = canvas.toDataURL('image/png')
+      const saved = await window.api.assets.saveRenderedThumb(asset.id, dataUrl)
+      if (saved) {
+        showToast('已将当前视频帧设为封面缩略图', 'success')
+        await refreshAssets()
+      } else {
+        showToast('保存封面缩略图失败', 'error')
+      }
+    } catch {
+      showToast('截取视频当前帧失败', 'error')
+    } finally {
+      setCapturingVideoCover(false)
+    }
+  }
 
   if (!asset) return null
 
@@ -590,6 +758,11 @@ export const InlinePreview: React.FC = () => {
           fileUrl={fileUrl}
           wheelMode={previewWheelMode}
           alphaBackdrop={alphaBackdrop}
+          eyedropperActive={eyedropperActive}
+          onPickColor={async (hex, rgb) => {
+            await window.api.system.copyPath(hex)
+            showToast(`已取色并复制 ${hex} (${rgb})`, 'success')
+          }}
           onAlphaDetected={setImageHasAlpha}
           onNavigateWheel={handleThrottledWheelNavigate}
           onZoomDisplayChange={setZoomScale}
@@ -622,8 +795,10 @@ export const InlinePreview: React.FC = () => {
             </div>
           ) : (
             <video
+              ref={videoElRef}
               key={asset.id}
               src={fileUrl}
+              crossOrigin="anonymous"
               controls
               autoPlay
               onError={() => setVideoError(true)}
@@ -861,6 +1036,55 @@ export const InlinePreview: React.FC = () => {
 
         {/* Right: Media-specific Controls & System Actions */}
         <div className="flex items-center gap-1.5 shrink-0">
+          {asset.mediaType === 'image' && (
+            <button
+              type="button"
+              onClick={() => setEyedropperActive((v) => !v)}
+              className="h-8 px-2.5 rounded-md border text-xs flex items-center gap-1.5 hover:bg-[var(--bg-hover)] cursor-pointer transition-colors"
+              style={{
+                backgroundColor: eyedropperActive ? 'var(--bg-active)' : 'var(--bg-surface)',
+                borderColor: eyedropperActive ? 'var(--accent)' : 'var(--border-subtle)',
+                color: eyedropperActive ? 'var(--accent)' : 'var(--text-secondary)'
+              }}
+              title="像素吸管取色器 (快捷键 I)"
+            >
+              <Pipette className="w-3.5 h-3.5" />
+              <span className="hidden xl:inline">{eyedropperActive ? '取色中' : '取色'}</span>
+            </button>
+          )}
+
+          {asset.mediaType === 'video' && !videoError && (
+            <button
+              type="button"
+              disabled={capturingVideoCover}
+              onClick={handleCaptureVideoCover}
+              className="h-8 px-2.5 rounded-md border text-xs flex items-center gap-1.5 hover:bg-[var(--bg-hover)] disabled:opacity-50 cursor-pointer"
+              style={{
+                backgroundColor: 'var(--bg-surface)',
+                borderColor: 'var(--border-subtle)',
+                color: 'var(--text-secondary)'
+              }}
+              title="截取当前播放画面作为视频封面缩略图"
+            >
+              <Camera className="w-3.5 h-3.5" />
+              <span>{capturingVideoCover ? '保存中...' : '设为封面'}</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => toggleFavorite([asset.id])}
+            className="h-8 w-8 rounded-md border flex items-center justify-center hover:bg-[var(--bg-hover)] cursor-pointer transition-colors"
+            style={{
+              backgroundColor: asset.isFavorite ? 'rgba(244, 63, 94, 0.14)' : 'var(--bg-surface)',
+              borderColor: asset.isFavorite ? 'rgba(244, 63, 94, 0.45)' : 'var(--border-subtle)',
+              color: asset.isFavorite ? '#f43f5e' : 'var(--text-muted)'
+            }}
+            title={asset.isFavorite ? '取消收藏 (F)' : '收藏 (F)'}
+          >
+            <Heart className={`w-3.5 h-3.5 ${asset.isFavorite ? 'fill-rose-500' : ''}`} />
+          </button>
+
           {asset.mediaType === 'image' && (
             <div
               className="flex items-center gap-0.5 px-1 h-8 rounded-md border mr-1"

@@ -7,6 +7,7 @@ import {
   assignAssetsToGroups,
   createGroup,
   createSourceRoot,
+  shouldIncludeOtherFiles,
   updateSourceRoot
 } from '../db/repositories'
 import { classifyExtension, getMimeType, normalizeExt } from '@shared/mediaTypes'
@@ -326,6 +327,11 @@ export async function migrateFromEagle(
 
       const srcStat = await fsp.stat(originalFile)
       const ext = normalizeExt(itemMeta.ext || path.extname(originalFile))
+      if (!shouldIncludeOtherFiles() && classifyExtension(ext) === 'other') {
+        progress.skipped++
+        progress.processed++
+        continue
+      }
       const rawName = itemMeta.name ? `${sanitizeSegment(itemMeta.name)}${ext}` : sanitizeSegment(path.basename(originalFile))
 
       // Resolve all matching groups in our app (preserving multi-folder & nested hierarchy!)

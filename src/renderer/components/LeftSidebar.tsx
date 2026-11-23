@@ -2,12 +2,14 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import {
   AlertTriangle,
+  Ban,
   Box,
   ChevronDown,
   ChevronRight,
   ChevronsDownUp,
   ChevronsUpDown,
   Clock,
+  CopyCheck,
   Edit2,
   EyeOff,
   File,
@@ -17,6 +19,7 @@ import {
   FolderOpen,
   FolderTree,
   HardDrive,
+  Heart,
   Image as ImageIcon,
   Inbox,
   Layers,
@@ -25,6 +28,8 @@ import {
   RefreshCw,
   Search,
   Settings,
+  ShieldCheck,
+  ShieldOff,
   Trash2,
   X
 } from 'lucide-react'
@@ -66,6 +71,12 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
     mediaTypes,
     toggleMediaType,
     clearMediaTypes,
+    extensions,
+    toggleExtension,
+    removeExtensions,
+    clearExtensions,
+    includeOtherFiles,
+    updateSettings,
     groupId,
     setGroupId,
     rootId,
@@ -74,9 +85,14 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
     sources,
     stats,
     scanProgress,
+    thumbProgress,
+    modelThumbProgress,
+    internalDragAssetIds,
+    setInternalDragAssetIds,
     updateState,
     deleteThumbsOnRemoveSource,
     openSettings,
+    openDuplicates,
     refreshAll,
     showToast,
     confirm
@@ -87,6 +103,12 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
       mediaTypes: s.mediaTypes,
       toggleMediaType: s.toggleMediaType,
       clearMediaTypes: s.clearMediaTypes,
+      extensions: s.extensions,
+      toggleExtension: s.toggleExtension,
+      removeExtensions: s.removeExtensions,
+      clearExtensions: s.clearExtensions,
+      includeOtherFiles: s.settings.includeOtherFiles,
+      updateSettings: s.updateSettings,
       groupId: s.groupId,
       setGroupId: s.setGroupId,
       rootId: s.rootId,
@@ -95,9 +117,14 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
       sources: s.sources,
       stats: s.stats,
       scanProgress: s.scanProgress,
+      thumbProgress: s.thumbProgress,
+      modelThumbProgress: s.modelThumbProgress,
+      internalDragAssetIds: s.internalDragAssetIds,
+      setInternalDragAssetIds: s.setInternalDragAssetIds,
       updateState: s.updateState,
       deleteThumbsOnRemoveSource: s.settings.deleteThumbsOnRemoveSource,
       openSettings: s.openSettings,
+      openDuplicates: s.openDuplicates,
       refreshAll: s.refreshAll,
       showToast: s.showToast,
       confirm: s.confirm
@@ -113,9 +140,15 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
   )
 
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(new Set())
+  const [expandedExtTypes, setExpandedExtTypes] = useState<Set<MediaType>>(new Set())
   const [groupFilterOpen, setGroupFilterOpen] = useState(false)
   const [groupFilterQuery, setGroupFilterQuery] = useState('')
   const [dragOverGroupId, setDragOverGroupId] = useState<number | null>(null)
+  const [draggingGroupId, setDraggingGroupId] = useState<number | null>(null)
+  const [groupDropIndicator, setGroupDropIndicator] = useState<{
+    targetId: number
+    pos: 'before' | 'inside' | 'after'
+  } | null>(null)
   const [groupModal, setGroupModal] = useState<GroupModalState | null>(null)
   const [sourcesExpanded, setSourcesExpanded] = useState(true)
   const [sourceContextMenu, setSourceContextMenu] = useState<{ x: number; y: number; source: SourceRoot } | null>(
@@ -361,20 +394,133 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
     await refreshAll()
   }
 
+  const isGroupDescendant = (sourceId: number, candidateId: number): boolean => {
+    const findNode = (nodes: GroupNode[]): GroupNode | null => {
+      for (const n of nodes) {
+        if (n.id === sourceId) return n
+        const hit = findNode(n.children)
+        if (hit) return hit
+      }
+      return null
+    }
+    const root = findNode(groups)
+    if (!root) return false
+    const walk = (n: GroupNode): boolean => {
+      if (n.id === candidateId) return true
+      return n.children.some(walk)
+    }
+    return walk(root)
+  }
+
+  const getSiblingIdsByParent = (parentId: number | null): number[] => {
+    if (parentId == null) return groups.map((g) => g.id)
+    const find = (nodes: GroupNode[]): GroupNode | null => {
+      for (const n of nodes) {
+        if (n.id === parentId) return n
+        const hit = find(n.children)
+        if (hit) return hit
+      }
+      return null
+    }
+    return find(groups)?.children.map((c) => c.id) ?? []
+  }
+
+  const handleGroupDragStart = (e: React.DragEvent, node: GroupNode) => {
+    e.stopPropagation()
+    setDraggingGroupId(node.id)
+    e.dataTransfer.setData('application/x-xiyun-group', String(node.id))
+    e.dataTransfer.effectAllowed = 'move'
+  }
+
+  const handleGroupDragEnd = () => {
+    setDraggingGroupId(null)
+    setGroupDropIndicator(null)
+    setDragOverGroupId(null)
+  }
+
+  const handleGroupDragOver = (e: React.DragEvent, targetNode: GroupNode) => {
+    const types = Array.from(e.dataTransfer.types || [])
+    // 1. Dragging a group to reorder or reparent
+    if (draggingGroupId != null || types.includes('application/x-xiyun-group')) {
+      const srcId = draggingGroupId
+      if (srcId != null && (srcId === targetNode.id || isGroupDescendant(srcId, targetNode.id))) {
+        return
+      }
+      e.preventDefault()
+      e.stopPropagation()
+      e.dataTransfer.dropEffect = 'move'
+      const rect = e.currentTarget.getBoundingClientRect()
+      const ratio = (e.clientY - rect.top) / Math.max(1, rect.height)
+      const pos: 'before' | 'inside' | 'after' = ratio < 0.26 ? 'before' : ratio > 0.74 ? 'after' : 'inside'
+      if (!groupDropIndicator || groupDropIndicator.targetId !== targetNode.id || groupDropIndicator.pos !== pos) {
+        setGroupDropIndicator({ targetId: targetNode.id, pos })
+      }
+      return
+    }
+
+    // 2. Dragging asset card(s) (either standard internal dataTransfer or native OS drag-out tracked via store)
+    if (types.includes('application/x-xiyun-assets') || internalDragAssetIds.length > 0) {
+      e.preventDefault()
+      e.stopPropagation()
+      e.dataTransfer.dropEffect = 'copy'
+      if (dragOverGroupId !== targetNode.id) setDragOverGroupId(targetNode.id)
+    }
+  }
+
   const handleDropOnGroup = async (e: React.DragEvent, targetGroup: GroupNode) => {
     e.preventDefault()
+    e.stopPropagation()
+    const indicator = groupDropIndicator
     setDragOverGroupId(null)
-    const raw = e.dataTransfer.getData('application/x-xiyun-assets')
-    if (!raw) return
-    try {
-      const assetIds = JSON.parse(raw) as number[]
-      if (Array.isArray(assetIds) && assetIds.length > 0) {
-        await window.api.groups.assignAssets(assetIds, [targetGroup.id])
-        showToast(`已将 ${assetIds.length} 项加入「${targetGroup.name}」`, 'success')
-        await refreshAll()
+    setGroupDropIndicator(null)
+
+    // 1. Reorder / Reparent group
+    const groupRaw = e.dataTransfer.getData('application/x-xiyun-group')
+    const movedGroupId = groupRaw ? Number(groupRaw) : draggingGroupId
+    setDraggingGroupId(null)
+
+    if (movedGroupId && Number.isFinite(movedGroupId)) {
+      if (movedGroupId === targetGroup.id || isGroupDescendant(movedGroupId, targetGroup.id)) return
+      const pos = indicator && indicator.targetId === targetGroup.id ? indicator.pos : 'inside'
+
+      if (pos === 'inside') {
+        const existingChildren = targetGroup.children.map((c) => c.id).filter((id) => id !== movedGroupId)
+        await window.api.groups.reorder(movedGroupId, targetGroup.id, [...existingChildren, movedGroupId])
+        setExpandedGroups((prev) => new Set(prev).add(targetGroup.id))
+        showToast(`已将分组移入「${targetGroup.name}」`, 'success')
+      } else {
+        const targetParentId = targetGroup.parentId
+        const siblings = getSiblingIdsByParent(targetParentId).filter((id) => id !== movedGroupId)
+        const targetIdx = siblings.indexOf(targetGroup.id)
+        const insertIdx = targetIdx === -1 ? siblings.length : pos === 'before' ? targetIdx : targetIdx + 1
+        siblings.splice(insertIdx, 0, movedGroupId)
+        await window.api.groups.reorder(movedGroupId, targetParentId, siblings)
       }
-    } catch {
-      // ignore invalid drag payload
+      await refreshAll()
+      return
+    }
+
+    // 2. Assign dragged assets to target group
+    let assetIds: number[] = []
+    const raw = e.dataTransfer.getData('application/x-xiyun-assets')
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed)) assetIds = parsed
+      } catch {
+        // ignore
+      }
+    }
+    if (assetIds.length === 0 && internalDragAssetIds.length > 0) {
+      assetIds = [...internalDragAssetIds]
+    }
+    if (internalDragAssetIds.length > 0) {
+      setInternalDragAssetIds([])
+    }
+    if (assetIds.length > 0) {
+      await window.api.groups.assignAssets(assetIds, [targetGroup.id])
+      showToast(`已将 ${assetIds.length} 项加入「${targetGroup.name}」`, 'success')
+      await refreshAll()
     }
   }
 
@@ -433,6 +579,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
     const isSelected = groupId === node.id
     const isBranchActive = selectedAncestorIds.has(node.id)
     const isDragOver = dragOverGroupId === node.id
+    const dropPos = groupDropIndicator?.targetId === node.id ? groupDropIndicator.pos : null
     const subDepth = Math.max(0, depth - 1)
     const countTooltip = hasChildren
       ? `${node.name}（本分组 ${node.assetCount} 项 · 含子分组共 ${node.totalCount} 项）`
@@ -440,25 +587,27 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
 
     return (
       <div key={node.id} className="relative">
+        {dropPos === 'before' && (
+          <div className="h-[2px] mx-2 rounded-full" style={{ backgroundColor: 'var(--accent)' }} />
+        )}
         <div
+          draggable
+          onDragStart={(e) => handleGroupDragStart(e, node)}
+          onDragEnd={handleGroupDragEnd}
           onClick={() => setGroupId(isSelected ? null : node.id)}
-          onDragOver={(e) => {
-            if (e.dataTransfer.types.includes('application/x-xiyun-assets')) {
-              e.preventDefault()
-              e.dataTransfer.dropEffect = 'copy'
-              if (dragOverGroupId !== node.id) setDragOverGroupId(node.id)
-            }
-          }}
+          onDragOver={(e) => handleGroupDragOver(e, node)}
           onDragLeave={() => {
             if (dragOverGroupId === node.id) setDragOverGroupId(null)
+            if (groupDropIndicator?.targetId === node.id) setGroupDropIndicator(null)
           }}
           onDrop={(e) => handleDropOnGroup(e, node)}
           title={countTooltip}
           className="group relative flex items-center gap-1.5 h-8 pr-2 rounded-lg cursor-pointer transition-all text-[0.84rem] hover:bg-[var(--bg-hover)]"
           style={{
             paddingLeft: `${8 + subDepth * 13}px`,
-            backgroundColor: isDragOver || isSelected ? 'var(--bg-active)' : undefined,
-            outline: isDragOver ? '1.5px dashed var(--accent)' : 'none',
+            backgroundColor: isDragOver || dropPos === 'inside' || isSelected ? 'var(--bg-active)' : undefined,
+            outline: isDragOver || dropPos === 'inside' ? '1.5px dashed var(--accent)' : 'none',
+            opacity: draggingGroupId === node.id ? 0.45 : 1,
             color: isSelected
               ? 'var(--text-primary)'
               : isBranchActive
@@ -531,6 +680,9 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
             {node.children.map((child) => renderChildGroupNode(child, depth + 1, rootColor))}
           </div>
         )}
+        {dropPos === 'after' && (
+          <div className="h-[2px] mx-2 rounded-full" style={{ backgroundColor: 'var(--accent)' }} />
+        )}
       </div>
     )
   }
@@ -541,52 +693,56 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
     const isSelected = groupId === node.id
     const isBranchActive = selectedAncestorIds.has(node.id)
     const isDragOver = dragOverGroupId === node.id
+    const dropPos = groupDropIndicator?.targetId === node.id ? groupDropIndicator.pos : null
     const countTooltip = hasChildren
       ? `${node.name}（本分组 ${node.assetCount} 项 · 含 ${node.children.length} 个子分组共 ${node.totalCount} 项）`
       : `${node.name}（${node.totalCount} 项）`
 
     return (
-      <div
-        key={node.id}
-        className={`prism-group-card rounded-xl overflow-hidden ${isExpanded ? 'prism-group-card-expanded' : ''}`}
-        style={{
-          borderColor: isDragOver
-            ? 'var(--accent)'
-            : isBranchActive && isExpanded
-              ? `${node.color}58`
-              : isSelected
-                ? `${node.color}45`
-                : undefined,
-          backgroundImage: isExpanded
-            ? `linear-gradient(145deg, ${node.color}16 0%, transparent 48%)`
-            : undefined
-        }}
-      >
-        {/* Root Group Header Row */}
+      <div key={node.id} className="relative">
+        {dropPos === 'before' && (
+          <div className="h-[2px] mb-1 mx-1 rounded-full" style={{ backgroundColor: 'var(--accent)' }} />
+        )}
         <div
-          onClick={() => setGroupId(isSelected ? null : node.id)}
-          onDragOver={(e) => {
-            if (e.dataTransfer.types.includes('application/x-xiyun-assets')) {
-              e.preventDefault()
-              e.dataTransfer.dropEffect = 'copy'
-              if (dragOverGroupId !== node.id) setDragOverGroupId(node.id)
-            }
-          }}
-          onDragLeave={() => {
-            if (dragOverGroupId === node.id) setDragOverGroupId(null)
-          }}
-          onDrop={(e) => handleDropOnGroup(e, node)}
-          title={countTooltip}
-          className={`group relative flex items-center gap-2 h-9 px-2 cursor-pointer transition-colors hover:bg-[var(--bg-hover)] ${
-            isExpanded ? 'border-b' : ''
-          }`}
+          className={`prism-group-card rounded-xl overflow-hidden ${isExpanded ? 'prism-group-card-expanded' : ''}`}
           style={{
-            backgroundColor: isDragOver || isSelected ? 'var(--bg-active)' : undefined,
-            borderColor: isExpanded ? 'var(--border-subtle)' : 'transparent',
-            outline: isDragOver ? '1.5px dashed var(--accent)' : 'none',
-            color: isSelected || isBranchActive ? 'var(--text-primary)' : 'var(--text-secondary)'
+            opacity: draggingGroupId === node.id ? 0.45 : 1,
+            borderColor:
+              isDragOver || dropPos === 'inside'
+                ? 'var(--accent)'
+                : isBranchActive && isExpanded
+                  ? `${node.color}58`
+                  : isSelected
+                    ? `${node.color}45`
+                    : undefined,
+            backgroundImage: isExpanded
+              ? `linear-gradient(145deg, ${node.color}16 0%, transparent 48%)`
+              : undefined
           }}
         >
+          {/* Root Group Header Row */}
+          <div
+            draggable
+            onDragStart={(e) => handleGroupDragStart(e, node)}
+            onDragEnd={handleGroupDragEnd}
+            onClick={() => setGroupId(isSelected ? null : node.id)}
+            onDragOver={(e) => handleGroupDragOver(e, node)}
+            onDragLeave={() => {
+              if (dragOverGroupId === node.id) setDragOverGroupId(null)
+              if (groupDropIndicator?.targetId === node.id) setGroupDropIndicator(null)
+            }}
+            onDrop={(e) => handleDropOnGroup(e, node)}
+            title={`${countTooltip}（支持拖拽调整排序或层级）`}
+            className={`group relative flex items-center gap-2 h-9 px-2 cursor-pointer transition-colors hover:bg-[var(--bg-hover)] ${
+              isExpanded ? 'border-b' : ''
+            }`}
+            style={{
+              backgroundColor: isDragOver || dropPos === 'inside' || isSelected ? 'var(--bg-active)' : undefined,
+              borderColor: isExpanded ? 'var(--border-subtle)' : 'transparent',
+              outline: isDragOver || dropPos === 'inside' ? '1.5px dashed var(--accent)' : 'none',
+              color: isSelected || isBranchActive ? 'var(--text-primary)' : 'var(--text-secondary)'
+            }}
+          >
           {isSelected && (
             <span className="prism-active-bar absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-full" />
           )}
@@ -652,6 +808,10 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
             {node.children.map((child) => renderChildGroupNode(child, 1, node.color))}
           </div>
         )}
+        </div>
+        {dropPos === 'after' && (
+          <div className="h-[2px] mt-1 mx-1 rounded-full" style={{ backgroundColor: 'var(--accent)' }} />
+        )}
       </div>
     )
   }
@@ -670,6 +830,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
         <section className="space-y-1">
           {[
             { id: 'all' as const, label: '全部素材', icon: Layers, count: stats.totalActive },
+            { id: 'favorites' as const, label: '我的收藏', icon: Heart, count: stats.favoriteCount, fav: true },
             { id: 'ungrouped' as const, label: '未分类', icon: Inbox, count: stats.ungroupedCount },
             { id: 'recent' as const, label: '最近添加', icon: Clock, count: stats.recentCount },
             { id: 'missing' as const, label: '离线 / 失效', icon: AlertTriangle, count: stats.missingCount, warn: true },
@@ -694,7 +855,13 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
                 <Icon
                   className="w-4 h-4 shrink-0"
                   style={{
-                    color: item.warn && item.count > 0 ? 'var(--warning)' : active ? 'var(--accent)' : 'var(--text-muted)'
+                    color: item.warn && item.count > 0
+                      ? 'var(--warning)'
+                      : item.fav && (active || item.count > 0)
+                        ? '#f43f5e'
+                        : active
+                          ? 'var(--accent)'
+                          : 'var(--text-muted)'
                   }}
                 />
                 <span className="flex-1 text-left truncate">{item.label}</span>
@@ -712,13 +879,13 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
           })}
         </section>
 
-        {/* 2. Media Type Tag Filter (Crystal Glass Capsules) */}
+        {/* 2. Media Type Tag Filter (Crystal Glass Capsules + Dynamic Sub-Formats + Exclude Unrecognized Toggle) */}
         <section>
           <div className="flex items-center justify-between px-2 mb-2">
             <span className="text-xs font-semibold tracking-wide" style={{ color: 'var(--text-muted)' }}>
               素材类型
             </span>
-            {mediaTypes.length > 0 ? (
+            {mediaTypes.length > 0 || extensions.length > 0 ? (
               <button
                 type="button"
                 onClick={clearMediaTypes}
@@ -728,15 +895,49 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
                 重置
               </button>
             ) : (
-              <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
-                Ctrl 多选
+              <span
+                className="text-xs"
+                style={{ color: 'var(--text-muted)' }}
+                title="点击类型可展开该类下实际拥有的细分格式；按住 Ctrl 可多选类型"
+              >
+                点选细筛
               </span>
             )}
           </div>
           <div className="grid grid-cols-2 gap-1.5">
             {MEDIA_TYPE_ITEMS.map(({ type, label, icon: Icon, color }) => {
-              const selected = mediaTypes.includes(type)
+              const isOtherBlocked = type === 'other' && !includeOtherFiles
+              const selected = !isOtherBlocked && mediaTypes.includes(type)
               const count = stats.byType[type] ?? 0
+              const subFormatCount = stats.extensionsByType?.[type]?.length ?? 0
+
+              if (isOtherBlocked) {
+                return (
+                  <button
+                    key={type}
+                    type="button"
+                    onClick={() =>
+                      showToast('当前已开启「排除非可识别文件」，关闭下方开关即可恢复显示', 'info')
+                    }
+                    className="flex items-center gap-1.5 px-2.5 h-8 rounded-lg border border-dashed text-xs font-medium cursor-pointer transition-opacity opacity-60 hover:opacity-85"
+                    style={{
+                      backgroundColor: 'transparent',
+                      borderColor: 'var(--border-subtle)',
+                      color: 'var(--text-muted)'
+                    }}
+                    title={
+                      stats.maskedOtherCount > 0
+                        ? `已排除非可识别文件（当前已屏蔽 ${stats.maskedOtherCount} 个），关闭下方开关可恢复显示`
+                        : '已排除非可识别文件（如 .dll / .exe 等），关闭下方开关可恢复显示'
+                    }
+                  >
+                    <Ban className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--text-muted)' }} />
+                    <span className="truncate flex-1 text-left line-through">{label}</span>
+                    <span className="text-[0.65rem] shrink-0">已屏蔽</span>
+                  </button>
+                )
+              }
+
               return (
                 <button
                   key={type}
@@ -749,6 +950,11 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
                     boxShadow: selected ? `0 0 14px -3px ${color}55, inset 0 1px 0 rgba(255,255,255,0.28)` : undefined,
                     color: selected ? 'var(--text-primary)' : 'var(--text-secondary)'
                   }}
+                  title={
+                    subFormatCount > 0
+                      ? `${label}（包含 ${subFormatCount} 种格式）· 点击展开细分格式，Ctrl 多选`
+                      : `${label} · 按住 Ctrl 可多选`
+                  }
                 >
                   <Icon className="w-4 h-4 shrink-0" style={{ color }} />
                   <span className="truncate flex-1 text-left">{label}</span>
@@ -765,11 +971,228 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
               )
             })}
           </div>
+
+          {/* Dynamic Sub-Format Chips for Selected Media Type(s) — ONLY displays extensions actually present in library */}
+          {(() => {
+            const selectedTypeSections = MEDIA_TYPE_ITEMS.filter(
+              (item) =>
+                mediaTypes.includes(item.type) &&
+                !(item.type === 'other' && !includeOtherFiles) &&
+                (stats.extensionsByType?.[item.type]?.length ?? 0) > 0
+            )
+            if (selectedTypeSections.length === 0) return null
+
+            return (
+              <div
+                className="mt-2 p-2 rounded-xl border space-y-2"
+                style={{
+                  backgroundColor: 'var(--group-card-bg)',
+                  borderColor: 'var(--group-card-border)'
+                }}
+              >
+                {selectedTypeSections.map(({ type, label, color }) => {
+                  const typeExts = stats.extensionsByType?.[type] ?? []
+                  const isExpanded = expandedExtTypes.has(type)
+                  const MAX_COMPACT = 10
+                  const visibleExts = isExpanded ? typeExts : typeExts.slice(0, MAX_COMPACT)
+                  const hiddenCount = Math.max(0, typeExts.length - visibleExts.length)
+                  const activeExtsInType = typeExts.filter((e) => extensions.includes(e.ext.toLowerCase()))
+
+                  return (
+                    <div key={type} className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-1 px-0.5">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span
+                            className="w-1.5 h-1.5 rounded-full shrink-0"
+                            style={{ backgroundColor: color }}
+                          />
+                          <span className="text-[0.7rem] font-semibold truncate" style={{ color: 'var(--text-secondary)' }}>
+                            {label}格式
+                          </span>
+                          <span className="text-[0.65rem] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+                            ({typeExts.length})
+                          </span>
+                        </div>
+                        {activeExtsInType.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              // Clear only extensions belonging to this media type (or all if single type selected)
+                              if (selectedTypeSections.length === 1) {
+                                clearExtensions()
+                              } else {
+                                removeExtensions(activeExtsInType.map((e) => e.ext))
+                              }
+                            }}
+                            className="text-[0.68rem] hover:underline cursor-pointer shrink-0"
+                            style={{ color }}
+                          >
+                            全部
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap gap-1">
+                        {visibleExts.map((item) => {
+                          const normExt = item.ext.toLowerCase()
+                          const active = extensions.includes(normExt)
+                          return (
+                            <button
+                              key={item.ext}
+                              type="button"
+                              onClick={() => toggleExtension(item.ext)}
+                              className="px-1.5 h-6 rounded-md border font-mono text-[0.68rem] uppercase cursor-pointer transition-all flex items-center gap-1 hover:bg-[var(--bg-hover)]"
+                              style={{
+                                backgroundColor: active ? `${color}26` : 'var(--bg-surface)',
+                                borderColor: active ? `${color}99` : 'var(--border-subtle)',
+                                color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                                boxShadow: active ? `0 0 8px -2px ${color}66` : undefined
+                              }}
+                              title={`${active ? '取消筛选' : '仅看'} ${item.ext.toUpperCase()}（共 ${item.count} 个）`}
+                            >
+                              <span className="font-semibold">{item.ext.replace(/^\./, '')}</span>
+                              <span
+                                className="text-[0.62rem] tabular-nums"
+                                style={{ color: active ? color : 'var(--text-muted)' }}
+                              >
+                                {item.count}
+                              </span>
+                            </button>
+                          )
+                        })}
+
+                        {hiddenCount > 0 && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedExtTypes((prev) => {
+                                const next = new Set(prev)
+                                next.add(type)
+                                return next
+                              })
+                            }
+                            className="px-1.5 h-6 rounded-md border text-[0.68rem] cursor-pointer hover:bg-[var(--bg-hover)]"
+                            style={{
+                              backgroundColor: 'transparent',
+                              borderColor: 'var(--border-subtle)',
+                              color: 'var(--text-muted)'
+                            }}
+                          >
+                            +{hiddenCount} 更多
+                          </button>
+                        )}
+                        {isExpanded && typeExts.length > MAX_COMPACT && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedExtTypes((prev) => {
+                                const next = new Set(prev)
+                                next.delete(type)
+                                return next
+                              })
+                            }
+                            className="px-1.5 h-6 rounded-md border text-[0.68rem] cursor-pointer hover:bg-[var(--bg-hover)]"
+                            style={{
+                              backgroundColor: 'transparent',
+                              borderColor: 'var(--border-subtle)',
+                              color: 'var(--text-muted)'
+                            }}
+                          >
+                            收起
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )
+          })()}
+
+          {/* One-Click Toggle: Exclude All Unrecognized ("other") Files */}
+          <button
+            type="button"
+            onClick={async () => {
+              const nextIncludeOther = !includeOtherFiles
+              await updateSettings({ includeOtherFiles: nextIncludeOther })
+              if (!nextIncludeOther) {
+                showToast('已排除所有非可识别文件，仓库仅识别并显示有效素材', 'success')
+              } else {
+                showToast('已恢复显示「其他」类型文件（如需收录目录中未扫描的此类文件，可重新扫描）', 'info')
+              }
+            }}
+            className="mt-2 w-full flex items-center justify-between gap-2 px-2.5 h-8 rounded-lg border text-xs font-medium cursor-pointer transition-all hover:bg-[var(--bg-hover)]"
+            style={{
+              backgroundColor: !includeOtherFiles ? 'var(--bg-active)' : 'var(--bg-surface)',
+              borderColor: !includeOtherFiles ? 'var(--accent)' : 'var(--border-subtle)',
+              color: !includeOtherFiles ? 'var(--text-primary)' : 'var(--text-secondary)'
+            }}
+            title={
+              !includeOtherFiles
+                ? '已开启：自动屏蔽 .dll / .exe 等无法识别的「其他」类型文件，不显示在仓库中且扫描/导入时跳过。点击可解除屏蔽。'
+                : '点击一键屏蔽所有非可识别文件（如 .dll / .exe 等），仓库仅保留有效素材。'
+            }
+          >
+            <span className="flex items-center gap-1.5 min-w-0">
+              {!includeOtherFiles ? (
+                <ShieldCheck className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--accent)' }} />
+              ) : (
+                <ShieldOff className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--text-muted)' }} />
+              )}
+              <span className="truncate">排除非可识别文件</span>
+            </span>
+            <span className="flex items-center gap-1.5 shrink-0">
+              {!includeOtherFiles && stats.maskedOtherCount > 0 && (
+                <span
+                  className="text-[0.65rem] tabular-nums px-1.5 py-0.2 rounded-full"
+                  style={{ backgroundColor: 'var(--glass-pill)', color: 'var(--text-muted)' }}
+                >
+                  已蔽 {stats.maskedOtherCount}
+                </span>
+              )}
+              <span
+                className="w-7 h-4 rounded-full relative transition-colors inline-block shrink-0"
+                style={{
+                  backgroundColor: !includeOtherFiles ? 'var(--accent-solid)' : 'var(--border-strong)'
+                }}
+              >
+                <span
+                  className="absolute top-0.5 w-3 h-3 rounded-full bg-white shadow-sm transition-transform"
+                  style={{
+                    left: !includeOtherFiles ? '14px' : '2px'
+                  }}
+                />
+              </span>
+            </span>
+          </button>
         </section>
 
-        {/* 3. Custom Groups Tree (Micro-Glass Nested Card Clusters) */}
+        {/* 3. Custom Groups Tree (Micro-Glass Nested Card Clusters + Drag-to-Reorder) */}
         <section>
-          <div className="flex items-center justify-between px-2 mb-2">
+          <div
+            onDragOver={(e) => {
+              if (draggingGroupId != null) {
+                e.preventDefault()
+                e.dataTransfer.dropEffect = 'move'
+              }
+            }}
+            onDrop={async (e) => {
+              if (draggingGroupId == null) return
+              e.preventDefault()
+              const movedId = draggingGroupId
+              setDraggingGroupId(null)
+              setGroupDropIndicator(null)
+              const rootIds = groups.map((g) => g.id).filter((id) => id !== movedId)
+              await window.api.groups.reorder(movedId, null, [movedId, ...rootIds])
+              showToast('已将该分组提升为一级主分组', 'success')
+              await refreshAll()
+            }}
+            className="flex items-center justify-between px-2 mb-2 rounded-md transition-colors"
+            style={{
+              outline: draggingGroupId != null ? '1px dashed var(--accent)' : 'none'
+            }}
+            title={draggingGroupId != null ? '拖到此处可提升为一级主分组' : undefined}
+          >
             <div className="flex items-center gap-1.5">
               <span className="text-xs font-semibold tracking-wide" style={{ color: 'var(--text-muted)' }}>
                 自定义分组
@@ -1029,8 +1452,61 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
         </div>
       )}
 
-      {/* Sticky Footer: Settings Button */}
-      <div className="p-2.5 border-t shrink-0" style={{ borderColor: 'var(--border-subtle)' }}>
+      {/* Background Thumbnail & 3D Cover Queue Progress Indicator */}
+      {(thumbProgress.running || modelThumbProgress.running) && (
+        <div
+          className="px-3.5 py-2 border-t text-xs space-y-1.5"
+          style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-surface)' }}
+        >
+          {(() => {
+            const total =
+              (thumbProgress.running ? thumbProgress.total : 0) +
+              (modelThumbProgress.running ? modelThumbProgress.total : 0)
+            const completed =
+              (thumbProgress.running ? thumbProgress.completed : 0) +
+              (modelThumbProgress.running ? modelThumbProgress.completed : 0)
+            const pct = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0
+            const label =
+              thumbProgress.running && modelThumbProgress.running
+                ? '正在后台生成缩略图与 3D 封面'
+                : modelThumbProgress.running
+                  ? '正在渲染 3D 模型封面'
+                  : '正在后台生成缩略图'
+            return (
+              <>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate font-medium" style={{ color: 'var(--text-secondary)' }}>
+                    {label}
+                  </span>
+                  <span className="tabular-nums shrink-0 font-mono" style={{ color: 'var(--accent)' }}>
+                    {completed}/{total}
+                  </span>
+                </div>
+                <div className="h-1.5 w-full rounded-full overflow-hidden bg-black/20">
+                  <div
+                    className="h-full rounded-full transition-all duration-200"
+                    style={{ width: `${pct}%`, background: 'var(--prism-rail-gradient)' }}
+                  />
+                </div>
+              </>
+            )
+          })()}
+        </div>
+      )}
+
+      {/* Sticky Footer: Duplicate Radar & Settings */}
+      <div className="p-2.5 border-t shrink-0 space-y-0.5" style={{ borderColor: 'var(--border-subtle)' }}>
+        <button
+          type="button"
+          onClick={openDuplicates}
+          className="w-full h-8 px-3 rounded-md flex items-center gap-2.5 text-xs font-medium hover:bg-[var(--bg-hover)] cursor-pointer transition-colors"
+          style={{ color: 'var(--text-secondary)' }}
+          title="跨盘符扫描内容完全相同的重复文件，支持合并分组备注后清理"
+        >
+          <CopyCheck className="w-4 h-4 shrink-0" style={{ color: 'var(--accent)' }} />
+          <span className="flex-1 text-left truncate">重复文件清理雷达</span>
+        </button>
+
         <button
           type="button"
           onClick={() => openSettings('sources')}

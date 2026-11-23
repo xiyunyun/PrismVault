@@ -1,7 +1,8 @@
 import fs from 'fs'
 import fsp from 'fs/promises'
 import path from 'path'
-import { BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
+import { execFile } from 'child_process'
+import { BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron'
 import sharp from 'sharp'
 import {
   ensureThumbSubdirs,
@@ -23,6 +24,7 @@ import {
   deleteAssetsByIds,
   deleteGroup,
   deleteSourceRoot,
+  findDuplicateAssetGroups,
   getAllSettings,
   getAssetById,
   getAssetsMissingThumbs,
@@ -32,10 +34,14 @@ import {
   listGroupTree,
   listSourceRoots,
   mergeAssetExtraMeta,
+  mergeDuplicateMetadata,
   queryAssets,
   removeMissingAssets,
+  reorderGroup,
+  setAssetsFavorite,
   setAssetsStatus,
   unassignAssetsFromGroups,
+  updateAssetDominantColors,
   updateAssetNote,
   updateAssetThumbAndDims,
   updateGroup,
@@ -44,6 +50,7 @@ import {
 } from '../db/repositories'
 import { indexScanner } from '../indexer/scanner'
 import { thumbnailQueue } from '../indexer/thumbnailer'
+import { extractDominantColors } from '../indexer/colorExtractor'
 import { watcherManager } from '../indexer/watcher'
 import { resolveFfmpeg } from '../indexer/ffmpeg'
 import { parseCadForPreview } from '../indexer/cad'
@@ -56,7 +63,15 @@ import {
   migrateClipboardDir
 } from '../indexer/clipboardImport'
 import { inspectEagleLibrary, migrateFromEagle } from '../indexer/eagleMigrator'
-import { resolveEffectiveBackdropStyle, syncAutoLaunch, syncTrayPresence, syncWindowAppearance } from '../index'
+import {
+  hideQuickSearchWindow,
+  openAssetInMainWindow,
+  resolveEffectiveBackdropStyle,
+  syncAutoLaunch,
+  syncQuickSearchShortcut,
+  syncTrayPresence,
+  syncWindowAppearance
+} from '../index'
 import { invalidateMediaProtocolCache } from '../protocol'
 import { cloudUpdater, getAppInfo } from '../updater'
 import type {
@@ -136,6 +151,7 @@ export function registerIpcHandlers(): void {
   indexScanner.onProgress((progress) => broadcast('event:scan-progress', progress))
   indexScanner.onAssetsChanged(() => broadcast('event:assets-changed'))
   thumbnailQueue.onReady((payload) => broadcast('event:thumb-ready', payload))
+  thumbnailQueue.onProgress((progress) => broadcast('event:thumb-progress', progress))
   cloudUpdater.onStateChange((state) => broadcast('event:update-state', state))
 
   // ===================== Sources =====================
@@ -346,10 +362,10 @@ export function registerIpcHandlers(): void {
       if (buf.length < 32) return null
 
       const isCad = isCadExt(asset.ext)
-      const subDir = isCad ? 'cad' : 'models'
-      const targetDir = isCad ? getCadThumbCacheDir() : getModelThumbCacheDir()
+      const isVideo = asset.mediaType === 'video'
+      const targetDir = isVideo ? getThumbCacheDir() : isCad ? getCadThumbCacheDir() : getModelThumbCacheDir()
       const outPath = path.join(targetDir, `${asset.id}.webp`)
-      const relPath = `${subDir}/${asset.id}.webp`
+      const relPath = isVideo ? `${asset.id}.webp` : `${isCad ? 'cad' : 'models'}/${asset.id}.webp`
 
       const img = sharp(buf)
       const meta = await img.metadata()
@@ -363,15 +379,109 @@ export function registerIpcHandlers(): void {
       const width = meta.width ?? 480
       const height = meta.height ?? 360
       updateAssetThumbAndDims(asset.id, relPath, width, height)
+      let dominantColors: string[] | undefined
+      if (isVideo) {
+        dominantColors = await extractDominantColors(outPath, 5)
+        updateAssetDominantColors(asset.id, dominantColors)
+      }
       if (extraMetaPatch && Object.keys(extraMetaPatch).length > 0) {
         mergeAssetExtraMeta(asset.id, extraMetaPatch)
       }
-      broadcast('event:thumb-ready', { assetId: asset.id, thumbPath: relPath, width, height })
+      broadcast('event:thumb-ready', { assetId: asset.id, thumbPath: relPath, width, height, dominantColors })
       return relPath
     }
   )
 
   ipcMain.handle('assets:getMissingModelThumbs', () => getMissing3DModelThumbs())
+
+  ipcMain.handle('assets:setFavorite', (_e, ids: number[], isFavorite: boolean) => {
+    setAssetsFavorite(ids, isFavorite)
+    broadcast('event:assets-changed')
+  })
+
+  ipcMain.handle('assets:findDuplicates', () => findDuplicateAssetGroups())
+
+  ipcMain.handle(
+    'assets:mergeDuplicates',
+    async (_e, keepId: number, removeIds: number[], moveToTrash: boolean) => {
+      const validRemove = removeIds.filter((id) => id !== keepId)
+      const keepAsset = getAssetById(keepId)
+      if (!keepAsset) {
+        return { removed: 0, failed: ['未找到要保留的主文件记录'] }
+      }
+
+      // Compute physical identity of the kept file so overlapping source roots / symlinks /
+      // Windows case-variant paths can NEVER accidentally trash the kept file on disk!
+      const keepNormPath = path.resolve(keepAsset.filePath).toLowerCase()
+      let keepRealPath: string | null = null
+      let keepDevIno: string | null = null
+      if (fs.existsSync(keepAsset.filePath)) {
+        try {
+          keepRealPath = fs.realpathSync(keepAsset.filePath).toLowerCase()
+        } catch {
+          keepRealPath = null
+        }
+        try {
+          const st = fs.statSync(keepAsset.filePath)
+          if (st.ino) keepDevIno = `${st.dev}:${st.ino}`
+        } catch {
+          keepDevIno = null
+        }
+      }
+
+      const isSamePhysicalFile = (candidatePath: string): boolean => {
+        if (path.resolve(candidatePath).toLowerCase() === keepNormPath) return true
+        if (keepRealPath) {
+          try {
+            if (fs.realpathSync(candidatePath).toLowerCase() === keepRealPath) return true
+          } catch {
+            // ignore
+          }
+        }
+        if (keepDevIno) {
+          try {
+            const st = fs.statSync(candidatePath)
+            if (st.ino && `${st.dev}:${st.ino}` === keepDevIno) return true
+          } catch {
+            // ignore
+          }
+        }
+        return false
+      }
+
+      mergeDuplicateMetadata(keepId, validRemove)
+
+      const failed: string[] = []
+      const removedIds: number[] = []
+      for (const rid of validRemove) {
+        const asset = getAssetById(rid)
+        if (!asset) continue
+        if (moveToTrash && fs.existsSync(asset.filePath)) {
+          // If this duplicate DB row points to the exact same physical file as keepAsset,
+          // only remove the redundant DB record without trashing the physical file!
+          if (isSamePhysicalFile(asset.filePath)) {
+            removedIds.push(rid)
+            continue
+          }
+          try {
+            await shell.trashItem(asset.filePath)
+            removedIds.push(rid)
+          } catch {
+            failed.push(asset.fileName)
+          }
+        } else {
+          removedIds.push(rid)
+        }
+      }
+      if (removedIds.length > 0) {
+        deleteAssetsByIds(removedIds)
+      }
+      broadcast('event:assets-changed')
+      return { removed: removedIds.length, failed }
+    }
+  )
+
+  ipcMain.handle('assets:backfillColors', () => thumbnailQueue.backfillMissingColors())
 
   // ===================== Groups =====================
   ipcMain.handle('groups:listTree', () => listGroupTree())
@@ -388,6 +498,14 @@ export function registerIpcHandlers(): void {
       const updated = updateGroup(id, patch)
       broadcast('event:assets-changed')
       return updated
+    }
+  )
+
+  ipcMain.handle(
+    'groups:reorder',
+    (_e, id: number, targetParentId: number | null, orderedSiblingIds: number[]) => {
+      reorderGroup(id, targetParentId, orderedSiblingIds)
+      broadcast('event:assets-changed')
     }
   )
 
@@ -436,8 +554,17 @@ export function registerIpcHandlers(): void {
     if (safePatch.autoLaunch !== undefined) {
       syncAutoLaunch(normalized.autoLaunch)
     }
+    if (safePatch.quickSearchEnabled !== undefined || safePatch.quickSearchShortcut !== undefined) {
+      syncQuickSearchShortcut(
+        Boolean(normalized.quickSearchEnabled),
+        normalized.quickSearchShortcut || 'Alt+Space'
+      )
+    }
     if (safePatch.ffmpegPath !== undefined) {
       await resolveFfmpeg(true)
+    }
+    if (safePatch.includeOtherFiles !== undefined) {
+      broadcast('event:assets-changed')
     }
     return normalized
   })
@@ -598,6 +725,121 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('system:copyPath', (_e, filePath: string) => {
     clipboard.writeText(filePath)
+  })
+
+  ipcMain.handle(
+    'system:copyFilesToClipboard',
+    async (_e, filePaths: string[], mode: 'file' | 'image' = 'file'): Promise<{ ok: boolean; error?: string }> => {
+      const existing = filePaths.filter((p) => p && fs.existsSync(p))
+      if (existing.length === 0) {
+        return { ok: false, error: '文件不存在或已离线' }
+      }
+
+      if (mode === 'image' && existing.length === 1) {
+        try {
+          const pngBuf = await sharp(existing[0], { failOn: 'none', pages: 1 }).rotate().png().toBuffer()
+          const img = nativeImage.createFromBuffer(pngBuf)
+          if (!img.isEmpty()) {
+            clipboard.writeImage(img)
+            return { ok: true }
+          }
+        } catch {
+          // fallback to nativeImage directly
+          const img = nativeImage.createFromPath(existing[0])
+          if (!img.isEmpty()) {
+            clipboard.writeImage(img)
+            return { ok: true }
+          }
+        }
+        return { ok: false, error: '无法将此文件转为剪贴板图像' }
+      }
+
+      if (process.platform === 'win32') {
+        const b64 = Buffer.from(JSON.stringify(existing), 'utf8').toString('base64')
+        const psScript = [
+          'Add-Type -AssemblyName System.Windows.Forms',
+          `$json = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${b64}'))`,
+          '$paths = ConvertFrom-Json $json',
+          'if ($paths -is [string]) { $paths = @($paths) }',
+          '$list = New-Object System.Collections.Specialized.StringCollection',
+          'foreach ($p in $paths) { if (Test-Path -LiteralPath $p) { [void]$list.Add($p) } }',
+          'if ($list.Count -gt 0) { [System.Windows.Forms.Clipboard]::SetFileDropList($list) }'
+        ].join('; ')
+
+        return new Promise((resolve) => {
+          execFile(
+            'powershell.exe',
+            ['-NoProfile', '-NonInteractive', '-STA', '-Command', psScript],
+            { timeout: 6000 },
+            (err) => {
+              if (err) {
+                clipboard.writeText(existing.join('\n'))
+                resolve({ ok: false, error: '复制文件到系统剪贴板失败' })
+              } else {
+                resolve({ ok: true })
+              }
+            }
+          )
+        })
+      }
+
+      clipboard.writeText(existing.join('\n'))
+      return { ok: true }
+    }
+  )
+
+  ipcMain.on('system:startDragOut', (event, filePaths: string[], thumbPath?: string | null) => {
+    const existing = (Array.isArray(filePaths) ? filePaths : []).filter((p) => p && fs.existsSync(p))
+    if (existing.length === 0) return
+
+    let iconImg: Electron.NativeImage | null = null
+    if (thumbPath) {
+      const thumbFull = path.join(getThumbCacheDir(), thumbPath)
+      if (fs.existsSync(thumbFull)) {
+        try {
+          const loaded = nativeImage.createFromBuffer(fs.readFileSync(thumbFull))
+          if (!loaded.isEmpty()) {
+            iconImg = loaded.resize({ width: 64, height: 64, quality: 'good' })
+          }
+        } catch {
+          iconImg = null
+        }
+      }
+    }
+    if (!iconImg || iconImg.isEmpty()) {
+      const candidates = [
+        path.join(__dirname, '../../resources/icon.png'),
+        path.join(process.resourcesPath || '', 'icon.png')
+      ]
+      const iconPath = candidates.find((p) => p && fs.existsSync(p))
+      if (iconPath) {
+        try {
+          iconImg = nativeImage.createFromBuffer(fs.readFileSync(iconPath)).resize({ width: 48, height: 48 })
+        } catch {
+          iconImg = nativeImage.createEmpty()
+        }
+      } else {
+        iconImg = nativeImage.createEmpty()
+      }
+    }
+
+    try {
+      event.sender.startDrag({
+        file: existing[0],
+        files: existing,
+        icon: iconImg
+      })
+    } catch {
+      // ignore drag errors
+    }
+  })
+
+  ipcMain.handle('quickSearch:hide', () => {
+    hideQuickSearchWindow()
+  })
+
+  ipcMain.handle('quickSearch:openAssetInMain', (_e, assetId: number) => {
+    openAssetInMainWindow(assetId)
   })
 
   ipcMain.handle('system:checkFfmpeg', () => resolveFfmpeg(true))

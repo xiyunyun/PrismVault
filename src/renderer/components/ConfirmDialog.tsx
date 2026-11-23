@@ -41,7 +41,7 @@ export const ConfirmDialog: React.FC = () => {
 
   return (
     <div
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/55 backdrop-blur-[2px] p-4"
+      className="fixed inset-0 z-[90] flex items-center justify-center bg-black/55 backdrop-blur-[2px] p-4"
       onClick={() => resolveConfirm(false)}
     >
       <div
@@ -81,7 +81,7 @@ export const ConfirmDialog: React.FC = () => {
 
             {confirmDialog.detail && (
               <p
-                className="text-xs leading-relaxed px-3 py-2 rounded-md border mt-2"
+                className="text-xs leading-relaxed px-3 py-2 rounded-md border mt-2 whitespace-pre-line break-all"
                 style={{
                   backgroundColor: 'var(--bg-elevated)',
                   borderColor: 'var(--border-subtle)',

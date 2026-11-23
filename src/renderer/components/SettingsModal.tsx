@@ -582,16 +582,16 @@ export const SettingsModal: React.FC = () => {
                   <label className="flex items-center justify-between gap-3 text-sm cursor-pointer">
                     <div>
                       <div className="font-medium" style={{ color: 'var(--text-primary)' }}>
-                        纳管“其他”未知扩展名文件
+                        排除非可识别文件（屏蔽「其他」类型）
                       </div>
                       <div className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                        开启后，除图片/视频/音频/文本之外的其他类型文件也会被收入库中（重新扫描生效）
+                        开启后，自动屏蔽 .dll、.exe 等无法识别的杂项文件，不显示在仓库中且扫描/导入时跳过（与左侧栏快捷开关同步）
                       </div>
                     </div>
                     <input
                       type="checkbox"
-                      checked={settings.includeOtherFiles}
-                      onChange={(e) => updateSettings({ includeOtherFiles: e.target.checked })}
+                      checked={!settings.includeOtherFiles}
+                      onChange={(e) => updateSettings({ includeOtherFiles: !e.target.checked })}
                       className="accent-[var(--accent-solid)] w-4 h-4 cursor-pointer shrink-0"
                     />
                   </label>
@@ -1098,6 +1098,104 @@ export const SettingsModal: React.FC = () => {
                       className="w-4 h-4 mt-0.5 accent-[var(--accent-solid)] cursor-pointer shrink-0"
                     />
                   </label>
+
+                  {/* Video Card Hover Instant Preview */}
+                  <label
+                    className="flex items-start justify-between gap-3 p-3 rounded-lg border cursor-pointer hover:border-[var(--border-strong)] transition-colors"
+                    style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
+                  >
+                    <div className="space-y-0.5">
+                      <div className="text-xs font-semibold" style={{ color: 'var(--text-primary)' }}>
+                        视频卡片悬停即时静音预览
+                      </div>
+                      <div className="text-[0.72rem] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                        鼠标悬停在视频卡片上约 0.3 秒即自动静音循环播放预览，移开立刻释放解码器资源。
+                      </div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.videoHoverPreview !== false}
+                      onChange={async (e) => {
+                        await updateSettings({ videoHoverPreview: e.target.checked })
+                        showToast(
+                          e.target.checked ? '已开启视频卡片悬停预览' : '已关闭视频卡片悬停预览',
+                          'success'
+                        )
+                      }}
+                      className="w-4 h-4 mt-0.5 accent-[var(--accent-solid)] cursor-pointer shrink-0"
+                    />
+                  </label>
+
+                  {/* Global Quick Search Spotlight Overlay (Default OFF!) */}
+                  <div
+                    className="p-3 rounded-lg border space-y-2.5"
+                    style={{ backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)' }}
+                  >
+                    <label className="flex items-start justify-between gap-3 cursor-pointer">
+                      <div className="space-y-0.5">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-semibold" style={{ color: 'var(--text-primary)' }}>
+                            启用全局快捷键「极速搜图浮窗」
+                          </span>
+                          <span
+                            className="text-[0.66rem] px-1.5 py-0.2 rounded-full"
+                            style={{ backgroundColor: 'var(--bg-elevated)', color: 'var(--text-muted)' }}
+                          >
+                            默认关闭
+                          </span>
+                        </div>
+                        <div className="text-[0.72rem] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                          开启后可在任意软件（PS / Blender / AutoCAD / 微信等）中按全局快捷键瞬间呼出搜索浮窗，搜到素材可直接复制或拖出使用。
+                        </div>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(settings.quickSearchEnabled)}
+                        onChange={async (e) => {
+                          await updateSettings({ quickSearchEnabled: e.target.checked })
+                          showToast(
+                            e.target.checked
+                              ? `已开启全局极速搜图浮窗（快捷键：${settings.quickSearchShortcut || 'Alt+Space'}）`
+                              : '已关闭全局极速搜图快捷键',
+                            'success'
+                          )
+                        }}
+                        className="w-4 h-4 mt-0.5 accent-[var(--accent-solid)] cursor-pointer shrink-0"
+                      />
+                    </label>
+
+                    {settings.quickSearchEnabled && (
+                      <div
+                        className="pt-2 border-t flex flex-wrap items-center justify-between gap-2 text-xs"
+                        style={{ borderColor: 'var(--border-subtle)' }}
+                      >
+                        <span style={{ color: 'var(--text-secondary)' }}>呼出快捷键组合：</span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {['Alt+Space', 'Ctrl+Shift+Space', 'Alt+Q', 'Ctrl+Alt+P'].map((accel) => {
+                            const active = (settings.quickSearchShortcut || 'Alt+Space') === accel
+                            return (
+                              <button
+                                key={accel}
+                                type="button"
+                                onClick={async () => {
+                                  await updateSettings({ quickSearchShortcut: accel })
+                                  showToast(`已将极速搜图快捷键设为 ${accel}`, 'success')
+                                }}
+                                className="px-2.5 h-7 rounded-md border font-mono text-xs cursor-pointer transition-colors"
+                                style={{
+                                  backgroundColor: active ? 'var(--accent-solid)' : 'var(--bg-elevated)',
+                                  borderColor: active ? 'var(--accent-solid)' : 'var(--border-subtle)',
+                                  color: active ? '#fff' : 'var(--text-secondary)'
+                                }}
+                              >
+                                {accel}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 {/* Preview Mouse Wheel Interaction Mode */}

@@ -18,6 +18,7 @@ import {
   assignAssetsToGroups,
   createSourceRoot,
   getAssetById,
+  shouldIncludeOtherFiles,
   updateSettings
 } from '../db/repositories'
 import {
@@ -158,10 +159,12 @@ async function readAllCopiedPaths(): Promise<string[]> {
 }
 
 async function expandToRegularFiles(
-  inputPaths: string[]
-): Promise<Array<{ filePath: string; size: number; modifiedAt: number }>> {
+  inputPaths: string[],
+  includeOtherFiles: boolean
+): Promise<{ files: Array<{ filePath: string; size: number; modifiedAt: number }>; ignoredOtherCount: number }> {
   const results: Array<{ filePath: string; size: number; modifiedAt: number }> = []
   const seen = new Set<string>()
+  let ignoredOtherCount = 0
 
   const walk = async (target: string): Promise<void> => {
     if (results.length >= MAX_EXPANDED_FILES) return
@@ -176,6 +179,10 @@ async function expandToRegularFiles(
       const key = resolved.toLowerCase()
       if (!seen.has(key)) {
         seen.add(key)
+        if (!includeOtherFiles && classifyExtension(path.extname(resolved)) === 'other') {
+          ignoredOtherCount++
+          return
+        }
         results.push({ filePath: resolved, size: stat.size, modifiedAt: Math.floor(stat.mtimeMs) })
       }
     } else if (stat.isDirectory()) {
@@ -197,15 +204,16 @@ async function expandToRegularFiles(
     await walk(p)
   }
 
-  return results
+  return { files: results, ignoredOtherCount }
 }
 
-function findConflictingAsset(fileName: string, clipDir: string): Asset | null {
+function findConflictingAsset(fileName: string, clipDir: string, includeOtherFiles: boolean): Asset | null {
   const db = getDb()
+  const otherGuard = includeOtherFiles ? '' : ` AND media_type != 'other'`
   // Prefer an exact match inside the import storage folder first
   const exactInClip = path.join(clipDir, fileName)
   const inClipRow = db
-    .prepare(`SELECT id FROM assets WHERE status = 'active' AND lower(file_path) = lower(?) LIMIT 1`)
+    .prepare(`SELECT id FROM assets WHERE status = 'active'${otherGuard} AND lower(file_path) = lower(?) LIMIT 1`)
     .get(exactInClip) as { id: number } | undefined
   if (inClipRow) {
     return getAssetById(Number(inClipRow.id))
@@ -213,7 +221,9 @@ function findConflictingAsset(fileName: string, clipDir: string): Asset | null {
 
   // Otherwise match any active asset in the library with the exact same filename (case-insensitive)
   const sameNameRow = db
-    .prepare(`SELECT id FROM assets WHERE status = 'active' AND lower(file_name) = lower(?) ORDER BY modified_at DESC LIMIT 1`)
+    .prepare(
+      `SELECT id FROM assets WHERE status = 'active'${otherGuard} AND lower(file_name) = lower(?) ORDER BY modified_at DESC LIMIT 1`
+    )
     .get(fileName) as { id: number } | undefined
   if (sameNameRow) {
     return getAssetById(Number(sameNameRow.id))
@@ -457,7 +467,8 @@ export async function inspectImportPaths(inputPaths: string[]): Promise<Clipboar
     }
   }
 
-  const files = await expandToRegularFiles(inputPaths)
+  const includeOther = shouldIncludeOtherFiles()
+  const { files, ignoredOtherCount } = await expandToRegularFiles(inputPaths, includeOther)
   if (files.length === 0) {
     return {
       hasContent: false,
@@ -465,7 +476,10 @@ export async function inspectImportPaths(inputPaths: string[]): Promise<Clipboar
       fileCount: 0,
       totalBytes: 0,
       conflicts: [],
-      reason: '所选内容中没有可导入的文件'
+      reason:
+        ignoredOtherCount > 0
+          ? `已开启「排除非可识别文件」，已自动过滤 ${ignoredOtherCount} 个非可识别文件`
+          : '所选内容中没有可导入的文件'
     }
   }
 
@@ -475,7 +489,7 @@ export async function inspectImportPaths(inputPaths: string[]): Promise<Clipboar
 
   for (const f of files) {
     const fileName = path.basename(f.filePath)
-    const existing = findConflictingAsset(fileName, clipDir)
+    const existing = findConflictingAsset(fileName, clipDir, includeOther)
     if (existing) {
       const ext = normalizeExt(path.extname(fileName))
       const quick = await generateQuickPreviewForIncoming(f.filePath, ext)
@@ -555,6 +569,8 @@ export async function commitClipboardImport(opts: {
   let replacedCount = 0
   let skippedCount = 0
 
+  const includeOther = shouldIncludeOtherFiles()
+
   if (Array.isArray(opts.filePaths) && opts.filePaths.length > 0) {
     for (const srcPath of opts.filePaths) {
       try {
@@ -563,8 +579,14 @@ export async function commitClipboardImport(opts: {
           continue
         }
 
+        const ext = normalizeExt(path.extname(srcPath))
+        if (!includeOther && classifyExtension(ext) === 'other') {
+          skippedCount++
+          continue
+        }
+
         const fileName = path.basename(srcPath)
-        const existing = findConflictingAsset(fileName, clipDir)
+        const existing = findConflictingAsset(fileName, clipDir, includeOther)
         const resolution = opts.resolutions?.[path.resolve(srcPath).toLowerCase()] ?? opts.resolutions?.[srcPath.toLowerCase()]
 
         if (existing && resolution === 'skip') {

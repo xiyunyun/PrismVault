@@ -257,6 +257,7 @@ class IndexScanner {
     // Step 1: Identify assets in this root that were not seen on disk
     const disappearedIds: number[] = []
     for (const row of existingRows) {
+      if (!includeOtherFiles && row.media_type === 'other') continue
       if (row.status === 'active' && !seenPaths.has(row.file_path.toLowerCase())) {
         disappearedIds.push(Number(row.id))
       }

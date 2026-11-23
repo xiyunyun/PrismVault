@@ -6,10 +6,12 @@ import { LeftSidebar } from './components/LeftSidebar'
 import { TopToolbar } from './components/TopToolbar'
 import { AssetCanvas } from './components/AssetCanvas'
 import { InlinePreview } from './components/InlinePreview'
+import { CompareView } from './components/CompareView'
 import { RightInspector } from './components/RightInspector'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { ImportConflictDialog } from './components/ImportConflictDialog'
 import { UpdateModal, WhatsNewModal } from './components/UpdateModal'
+import { DuplicateFinderModal } from './components/DuplicateFinderModal'
 import { useLibraryStore } from './store/useLibraryStore'
 import { flattenGroupTree } from './utils/mediaUrl'
 import { formatFileSize } from '@shared/mediaTypes'
@@ -18,25 +20,52 @@ import type { ClipboardInspectResult, ConflictResolution } from '@shared/types'
 const SettingsModal = React.lazy(() =>
   import('./components/SettingsModal').then((m) => ({ default: m.SettingsModal }))
 )
+const QuickSearchApp = React.lazy(() =>
+  import('./components/QuickSearchApp').then((m) => ({ default: m.QuickSearchApp }))
+)
 
+let modelThumbProgressSubscribed = false
 async function enqueueMissing3DThumbsLazily(): Promise<void> {
   const missing = await window.api.assets.getMissingModelThumbs()
   if (missing.length === 0) return
   // Only load Three.js bundle into memory when there are actually 3D models lacking thumbnails
   const { modelThumbQueue } = await import('./utils/model3d')
+  if (!modelThumbProgressSubscribed) {
+    modelThumbProgressSubscribed = true
+    modelThumbQueue.onProgress((p) => {
+      useLibraryStore.getState().setModelThumbProgress(p)
+    })
+  }
   modelThumbQueue.enqueueMany(missing)
 }
 
+const isQuickSearchMode =
+  typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('mode') === 'quicksearch'
+
 export const App: React.FC = () => {
+  if (isQuickSearchMode) {
+    return (
+      <Suspense fallback={null}>
+        <QuickSearchApp />
+      </Suspense>
+    )
+  }
+  return <MainWorkspaceApp />
+}
+
+const MainWorkspaceApp: React.FC = () => {
   const {
     init,
     refreshAll,
     setScanProgress,
+    setThumbProgress,
     setUpdateState,
+    focusAssetById,
     patchThumbsReadyBatch,
     leftPanelOpen,
     rightPanelOpen,
     previewAssetId,
+    compareAssetIds,
     settingsOpen,
     backdropStyle,
     backdropMotion,
@@ -49,11 +78,14 @@ export const App: React.FC = () => {
       init: s.init,
       refreshAll: s.refreshAll,
       setScanProgress: s.setScanProgress,
+      setThumbProgress: s.setThumbProgress,
       setUpdateState: s.setUpdateState,
+      focusAssetById: s.focusAssetById,
       patchThumbsReadyBatch: s.patchThumbsReadyBatch,
       leftPanelOpen: s.leftPanelOpen,
       rightPanelOpen: s.rightPanelOpen,
       previewAssetId: s.previewAssetId,
+      compareAssetIds: s.compareAssetIds,
       settingsOpen: s.settingsOpen,
       backdropStyle: s.settings.backdropStyle,
       backdropMotion: s.settings.backdropMotion,
@@ -172,7 +204,13 @@ export const App: React.FC = () => {
     let thumbBatchTimer: ReturnType<typeof setTimeout> | null = null
     const pendingThumbs = new Map<
       number,
-      { assetId: number; thumbPath: string; width?: number | null; height?: number | null }
+      {
+        assetId: number
+        thumbPath: string
+        width?: number | null
+        height?: number | null
+        dominantColors?: string[]
+      }
     >()
 
     const flushThumbBatch = () => {
@@ -218,6 +256,14 @@ export const App: React.FC = () => {
       }
     })
 
+    const unsubThumbProgress = window.api.events.onThumbProgress((progress) => {
+      setThumbProgress(progress)
+    })
+
+    const unsubFocusAsset = window.api.events.onFocusAsset((assetId) => {
+      focusAssetById(assetId).catch(() => undefined)
+    })
+
     const unsubChanged = window.api.events.onAssetsChanged(() => {
       scheduleRefresh()
     })
@@ -242,6 +288,8 @@ export const App: React.FC = () => {
       if (thumbBatchTimer) clearTimeout(thumbBatchTimer)
       unsubProgress()
       unsubThumb()
+      unsubThumbProgress()
+      unsubFocusAsset()
       unsubChanged()
       unsubUpdate()
     }
@@ -278,11 +326,50 @@ export const App: React.FC = () => {
         return
       }
 
-      if (state.previewAssetId != null) return
+      if (state.previewAssetId != null || state.compareAssetIds.length > 0 || state.duplicatesOpen) return
+
+      // Ctrl + C: Copy selected asset file(s) directly to Windows system clipboard (paste into WeChat / Explorer / Blender / CAD / PS)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && state.selectedIds.length > 0) {
+        const selText = window.getSelection()?.toString()
+        if (selText && selText.length > 0) return
+        e.preventDefault()
+        const idSet = new Set(state.selectedIds)
+        const paths = state.assets.filter((a) => idSet.has(a.id)).map((a) => a.filePath)
+        if (paths.length > 0) {
+          window.api.system
+            .copyFilesToClipboard(paths, 'file')
+            .then((res) => {
+              state.showToast(
+                res.ok
+                  ? `已复制 ${paths.length} 个文件到剪贴板（可直接粘贴到微信 / 资源管理器 / 设计软件）`
+                  : res.error || '复制文件失败',
+                res.ok ? 'success' : 'error'
+              )
+            })
+            .catch(() => undefined)
+        }
+        return
+      }
 
       if (e.code === 'Space' && state.selectedIds.length === 1) {
         e.preventDefault()
         state.setPreviewAssetId(state.selectedIds[0])
+      } else if (e.key.toLowerCase() === 'f' && !e.ctrlKey && !e.metaKey && state.selectedIds.length > 0) {
+        e.preventDefault()
+        state.toggleFavorite(state.selectedIds)
+      } else if (
+        e.key.toLowerCase() === 'c' &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        state.selectedIds.length >= 2 &&
+        state.selectedIds.length <= 4
+      ) {
+        const idSet = new Set(state.selectedIds)
+        const imgs = state.assets.filter((a) => idSet.has(a.id) && a.mediaType === 'image')
+        if (imgs.length >= 2) {
+          e.preventDefault()
+          state.openCompare(imgs.map((a) => a.id))
+        }
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
         e.preventDefault()
         state.selectAll()
@@ -294,10 +381,15 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [executeImportFlow])
 
-  // External OS File Drag-and-Drop onto window
+  // External OS File Drag-and-Drop onto window (ignore when internal native Drag-Out is active!)
   const isExternalFileDrag = (e: React.DragEvent): boolean => {
+    if (useLibraryStore.getState().internalDragAssetIds.length > 0) return false
     const types = Array.from(e.dataTransfer.types || [])
-    return types.includes('Files') && !types.includes('application/x-xiyun-assets')
+    return (
+      types.includes('Files') &&
+      !types.includes('application/x-xiyun-assets') &&
+      !types.includes('application/x-xiyun-group')
+    )
   }
 
   const handleWindowDragEnter = (e: React.DragEvent) => {
@@ -378,8 +470,10 @@ export const App: React.FC = () => {
   }, [])
 
   const isPreviewing = previewAssetId != null
+  const isComparing = !isPreviewing && compareAssetIds.length >= 2
+  const isCanvasHidden = isPreviewing || isComparing
   const activeBackdrop = backdropStyle || 'aurora'
-  const pauseAmbientMotion = !backdropMotion || isPreviewing
+  const pauseAmbientMotion = !backdropMotion || isCanvasHidden
 
   return (
     <div
@@ -427,9 +521,10 @@ export const App: React.FC = () => {
         )}
 
         <div className="prism-glass-canvas flex-1 min-w-0 h-full flex flex-col overflow-hidden">
-          {!isPreviewing && <TopToolbar />}
-          <AssetCanvas hidden={isPreviewing} />
+          {!isCanvasHidden && <TopToolbar />}
+          <AssetCanvas hidden={isCanvasHidden} />
           {isPreviewing && <InlinePreview />}
+          {isComparing && <CompareView />}
         </div>
 
         {rightPanelOpen && (
@@ -487,8 +582,9 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* Settings (Lazy-loaded on demand), Update/WhatsNew Modals & Unified Dialogs */}
+      {/* Settings (Lazy-loaded on demand), Duplicate Finder, Update/WhatsNew Modals & Unified Dialogs */}
       <Suspense fallback={null}>{settingsOpen && <SettingsModal />}</Suspense>
+      <DuplicateFinderModal />
       <UpdateModal />
       <WhatsNewModal />
       <ConfirmDialog />

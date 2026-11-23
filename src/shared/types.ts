@@ -1,13 +1,15 @@
 import type { MediaType } from './mediaTypes'
 
 export type AssetStatus = 'active' | 'missing' | 'hidden'
-export type SmartView = 'all' | 'ungrouped' | 'recent' | 'missing' | 'hidden'
+export type SmartView = 'all' | 'favorites' | 'ungrouped' | 'recent' | 'missing' | 'hidden'
 export type SortField = 'name' | 'created_at' | 'modified_at' | 'file_size'
 export type SortOrder = 'asc' | 'desc'
 export type ViewMode = 'waterfall' | 'grid'
 export type GridAspectRatio = '4:3' | '1:1' | '16:9'
 export type GridFitMode = 'cover' | 'contain'
 export type BackdropStyle = 'aurora' | 'mica' | 'pastel' | 'solid'
+export type AspectFilter = 'all' | 'landscape' | 'portrait' | 'square'
+export type FileSizeFilter = 'all' | 'small' | 'medium' | 'large'
 
 export interface AssetExtraMeta {
   fps?: number
@@ -141,6 +143,8 @@ export interface Asset {
   textSnippet: string | null
   status: AssetStatus
   indexedAt: number
+  isFavorite: boolean
+  dominantColors: string[]
   groupIds: number[]
 }
 
@@ -168,21 +172,47 @@ export interface AssetQueryFilter {
   search: string
   sortField: SortField
   sortOrder: SortOrder
+  extensions?: string[]
+  aspectFilter?: AspectFilter
+  sizeFilter?: FileSizeFilter
+  hasNoteOnly?: boolean
+  colorHex?: string | null
+  limit?: number
+  offset?: number
 }
 
 export interface AssetQueryResult {
   items: Asset[]
   total: number
+  hasMore: boolean
 }
 
 export interface LibraryStats {
   totalActive: number
+  favoriteCount: number
   ungroupedCount: number
   recentCount: number
   missingCount: number
   hiddenCount: number
+  maskedOtherCount: number
   byType: Record<MediaType, number>
   byRoot: Record<number, number>
+  extensions: Array<{ ext: string; count: number }>
+  extensionsByType: Record<MediaType, Array<{ ext: string; count: number }>>
+}
+
+export interface DuplicateGroup {
+  fingerprint: string
+  fileSize: number
+  count: number
+  items: Asset[]
+}
+
+export interface ThumbProgress {
+  running: boolean
+  completed: number
+  total: number
+  pending: number
 }
 
 export interface ScanProgress {
@@ -217,6 +247,9 @@ export interface AppSettings {
   autoScanOnStartup: boolean
   closeToTray: boolean
   autoLaunch: boolean
+  videoHoverPreview: boolean
+  quickSearchEnabled: boolean
+  quickSearchShortcut: string
   autoCheckUpdates: boolean
   updateMirrorUrl: string
   deleteThumbsOnRemoveSource: boolean
@@ -412,9 +445,17 @@ export interface XiyunApi {
     updateNote: (id: number, note: string) => Promise<void>
     batchAppendNote: (ids: number[], text: string) => Promise<void>
     setStatus: (ids: number[], status: AssetStatus) => Promise<void>
+    setFavorite: (ids: number[], isFavorite: boolean) => Promise<void>
     moveToTrash: (ids: number[]) => Promise<{ trashed: number; failed: string[] }>
     readTextContent: (id: number) => Promise<TextContentResult>
     removeMissing: (ids?: number[]) => Promise<number>
+    findDuplicates: () => Promise<DuplicateGroup[]>
+    mergeDuplicates: (
+      keepId: number,
+      removeIds: number[],
+      moveToTrash: boolean
+    ) => Promise<{ removed: number; failed: string[] }>
+    backfillColors: () => Promise<number>
     parseCad: (id: number) => Promise<CadPreviewData>
     saveRenderedThumb: (
       id: number,
@@ -427,6 +468,7 @@ export interface XiyunApi {
     listTree: () => Promise<GroupNode[]>
     create: (data: { name: string; parentId?: number | null; color?: string }) => Promise<GroupFlat>
     update: (id: number, patch: { name?: string; parentId?: number | null; color?: string; sortOrder?: number }) => Promise<GroupFlat>
+    reorder: (id: number, targetParentId: number | null, orderedSiblingIds: number[]) => Promise<void>
     delete: (id: number) => Promise<void>
     assignAssets: (assetIds: number[], groupIds: number[]) => Promise<void>
     unassignAssets: (assetIds: number[], groupIds: number[]) => Promise<void>
@@ -447,9 +489,15 @@ export interface XiyunApi {
     openExternal: (filePath: string) => Promise<void>
     openExternalUrl: (url: string) => Promise<void>
     copyPath: (filePath: string) => Promise<void>
+    copyFilesToClipboard: (filePaths: string[], mode?: 'file' | 'image') => Promise<{ ok: boolean; error?: string }>
+    startDragOut: (filePaths: string[], thumbPath?: string | null) => void
     checkFfmpeg: () => Promise<FfmpegStatus>
     getPathForFile: (file: File) => string
     getAppInfo: () => Promise<AppInfo>
+  }
+  quickSearch: {
+    hide: () => Promise<void>
+    openAssetInMain: (assetId: number) => Promise<void>
   }
   updater: {
     getState: () => Promise<UpdateState>
@@ -478,9 +526,19 @@ export interface XiyunApi {
   }
   events: {
     onScanProgress: (cb: (progress: ScanProgress) => void) => () => void
-    onThumbReady: (cb: (payload: { assetId: number; thumbPath: string; width?: number | null; height?: number | null }) => void) => () => void
+    onThumbReady: (
+      cb: (payload: {
+        assetId: number
+        thumbPath: string
+        width?: number | null
+        height?: number | null
+        dominantColors?: string[]
+      }) => void
+    ) => () => void
+    onThumbProgress: (cb: (progress: ThumbProgress) => void) => () => void
     onAssetsChanged: (cb: () => void) => () => void
     onEagleProgress: (cb: (progress: EagleMigrationProgress) => void) => () => void
     onUpdateState: (cb: (state: UpdateState) => void) => () => void
+    onFocusAsset: (cb: (assetId: number) => void) => () => void
   }
 }

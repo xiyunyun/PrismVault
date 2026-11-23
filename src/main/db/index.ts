@@ -294,6 +294,24 @@ export function initDatabase(): DatabaseSync {
     console.warn('[DB] media_type migration warning:', err)
   }
 
+  // Seamless v0.5.0 column migration: is_favorite + dominant_colors + composite indexes
+  try {
+    const cols = db.prepare(`PRAGMA table_info(assets)`).all() as Array<{ name: string }>
+    const colNames = new Set(cols.map((c) => c.name))
+    if (!colNames.has('is_favorite')) {
+      db.exec(`ALTER TABLE assets ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;`)
+    }
+    if (!colNames.has('dominant_colors')) {
+      db.exec(`ALTER TABLE assets ADD COLUMN dominant_colors TEXT;`)
+    }
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_assets_status_favorite ON assets(status, is_favorite, modified_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_assets_status_ext ON assets(status, ext);
+    `)
+  } catch (err) {
+    console.warn('[DB] v0.5.0 column migration warning:', err)
+  }
+
   // Apply custom thumbnail cache directory if user configured one
   try {
     const row = db.prepare(`SELECT value FROM app_settings WHERE key = 'thumbCacheDir'`).get() as

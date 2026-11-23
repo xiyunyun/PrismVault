@@ -18,9 +18,14 @@ const api: XiyunApi = {
     updateNote: (id, note) => ipcRenderer.invoke('assets:updateNote', id, note),
     batchAppendNote: (ids, text) => ipcRenderer.invoke('assets:batchAppendNote', ids, text),
     setStatus: (ids, status) => ipcRenderer.invoke('assets:setStatus', ids, status),
+    setFavorite: (ids, isFavorite) => ipcRenderer.invoke('assets:setFavorite', ids, isFavorite),
     moveToTrash: (ids) => ipcRenderer.invoke('assets:moveToTrash', ids),
     readTextContent: (id) => ipcRenderer.invoke('assets:readTextContent', id),
     removeMissing: (ids) => ipcRenderer.invoke('assets:removeMissing', ids),
+    findDuplicates: () => ipcRenderer.invoke('assets:findDuplicates'),
+    mergeDuplicates: (keepId, removeIds, moveToTrash) =>
+      ipcRenderer.invoke('assets:mergeDuplicates', keepId, removeIds, moveToTrash),
+    backfillColors: () => ipcRenderer.invoke('assets:backfillColors'),
     parseCad: (id) => ipcRenderer.invoke('assets:parseCad', id),
     saveRenderedThumb: (id, pngDataUrl, extraMetaPatch) =>
       ipcRenderer.invoke('assets:saveRenderedThumb', id, pngDataUrl, extraMetaPatch),
@@ -30,6 +35,8 @@ const api: XiyunApi = {
     listTree: () => ipcRenderer.invoke('groups:listTree'),
     create: (data) => ipcRenderer.invoke('groups:create', data),
     update: (id, patch) => ipcRenderer.invoke('groups:update', id, patch),
+    reorder: (id, targetParentId, orderedSiblingIds) =>
+      ipcRenderer.invoke('groups:reorder', id, targetParentId, orderedSiblingIds),
     delete: (id) => ipcRenderer.invoke('groups:delete', id),
     assignAssets: (assetIds, groupIds) => ipcRenderer.invoke('groups:assignAssets', assetIds, groupIds),
     unassignAssets: (assetIds, groupIds) => ipcRenderer.invoke('groups:unassignAssets', assetIds, groupIds)
@@ -50,9 +57,16 @@ const api: XiyunApi = {
     openExternal: (filePath) => ipcRenderer.invoke('system:openExternal', filePath),
     openExternalUrl: (url) => ipcRenderer.invoke('system:openExternalUrl', url),
     copyPath: (filePath) => ipcRenderer.invoke('system:copyPath', filePath),
+    copyFilesToClipboard: (filePaths, mode) =>
+      ipcRenderer.invoke('system:copyFilesToClipboard', filePaths, mode),
+    startDragOut: (filePaths, thumbPath) => ipcRenderer.send('system:startDragOut', filePaths, thumbPath),
     checkFfmpeg: () => ipcRenderer.invoke('system:checkFfmpeg'),
     getPathForFile: (file) => webUtils.getPathForFile(file),
     getAppInfo: () => ipcRenderer.invoke('system:getAppInfo')
+  },
+  quickSearch: {
+    hide: () => ipcRenderer.invoke('quickSearch:hide'),
+    openAssetInMain: (assetId) => ipcRenderer.invoke('quickSearch:openAssetInMain', assetId)
   },
   updater: {
     getState: () => ipcRenderer.invoke('updater:getState'),
@@ -86,6 +100,11 @@ const api: XiyunApi = {
       ipcRenderer.on('event:thumb-ready', listener)
       return () => ipcRenderer.removeListener('event:thumb-ready', listener)
     },
+    onThumbProgress: (cb) => {
+      const listener = (_e: Electron.IpcRendererEvent, progress: Parameters<typeof cb>[0]) => cb(progress)
+      ipcRenderer.on('event:thumb-progress', listener)
+      return () => ipcRenderer.removeListener('event:thumb-progress', listener)
+    },
     onAssetsChanged: (cb) => {
       const listener = () => cb()
       ipcRenderer.on('event:assets-changed', listener)
@@ -100,6 +119,11 @@ const api: XiyunApi = {
       const listener = (_e: Electron.IpcRendererEvent, state: Parameters<typeof cb>[0]) => cb(state)
       ipcRenderer.on('event:update-state', listener)
       return () => ipcRenderer.removeListener('event:update-state', listener)
+    },
+    onFocusAsset: (cb) => {
+      const listener = (_e: Electron.IpcRendererEvent, assetId: number) => cb(assetId)
+      ipcRenderer.on('event:focus-asset', listener)
+      return () => ipcRenderer.removeListener('event:focus-asset', listener)
     }
   }
 }

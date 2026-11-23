@@ -8,12 +8,14 @@ import type {
   AssetQueryResult,
   AssetStatus,
   ConvertSourceToGroupsResult,
+  DuplicateGroup,
   GroupFlat,
   GroupNode,
   LibraryStats,
   SourceRoot
 } from '@shared/types'
 import type { MediaType } from '@shared/mediaTypes'
+import { hexColorDistanceSq } from '../indexer/colorExtractor'
 
 export const DEFAULT_IGNORE_PATTERNS = [
   'node_modules',
@@ -45,6 +47,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoScanOnStartup: false,
   closeToTray: true,
   autoLaunch: true,
+  videoHoverPreview: true,
+  quickSearchEnabled: false,
+  quickSearchShortcut: 'Alt+Space',
   autoCheckUpdates: true,
   updateMirrorUrl: '',
   deleteThumbsOnRemoveSource: true,
@@ -70,6 +75,19 @@ export function getAllSettings(): AppSettings {
     }
   }
   return merged as unknown as AppSettings
+}
+
+export function shouldIncludeOtherFiles(): boolean {
+  const db = getDb()
+  const row = db.prepare(`SELECT value FROM app_settings WHERE key = 'includeOtherFiles'`).get() as
+    | { value: string }
+    | undefined
+  if (!row) return DEFAULT_SETTINGS.includeOtherFiles
+  try {
+    return Boolean(JSON.parse(row.value))
+  } catch {
+    return row.value === 'true'
+  }
 }
 
 export function updateSettings(patch: Partial<AppSettings>): AppSettings {
@@ -120,10 +138,11 @@ function mapSourceRow(row: SourceRootRow): SourceRoot {
 
 export function listSourceRoots(): SourceRoot[] {
   const db = getDb()
+  const otherGuard = shouldIncludeOtherFiles() ? '' : ` AND a.media_type != 'other'`
   const rows = db
     .prepare(
       `SELECT sr.*,
-        (SELECT COUNT(*) FROM assets a WHERE a.root_id = sr.id AND a.status = 'active') AS asset_count
+        (SELECT COUNT(*) FROM assets a WHERE a.root_id = sr.id AND a.status = 'active'${otherGuard}) AS asset_count
        FROM source_roots sr
        ORDER BY sr.created_at ASC`
     )
@@ -133,10 +152,11 @@ export function listSourceRoots(): SourceRoot[] {
 
 export function getSourceRootById(id: number): SourceRoot | null {
   const db = getDb()
+  const otherGuard = shouldIncludeOtherFiles() ? '' : ` AND a.media_type != 'other'`
   const row = db
     .prepare(
       `SELECT sr.*,
-        (SELECT COUNT(*) FROM assets a WHERE a.root_id = sr.id AND a.status = 'active') AS asset_count
+        (SELECT COUNT(*) FROM assets a WHERE a.root_id = sr.id AND a.status = 'active'${otherGuard}) AS asset_count
        FROM source_roots sr WHERE sr.id = ?`
     )
     .get(id) as unknown as SourceRootRow | undefined
@@ -233,8 +253,9 @@ export function convertSourceRootToGroups(rootId: number): ConvertSourceToGroups
   const rawBase = path.basename(resolvedRoot)
   const rootGroupName = (rawBase && rawBase.trim() ? rawBase.trim() : root.alias.trim()) || '索引目录'
 
+  const otherGuard = shouldIncludeOtherFiles() ? '' : ` AND media_type != 'other'`
   const assets = db
-    .prepare(`SELECT id, file_path FROM assets WHERE root_id = ? AND status = 'active'`)
+    .prepare(`SELECT id, file_path FROM assets WHERE root_id = ? AND status = 'active'${otherGuard}`)
     .all(rootId) as Array<{ id: number; file_path: string }>
 
   // Pre-load existing groups into an O(1) lookup map so repeated runs never create duplicates
@@ -347,12 +368,13 @@ function mapGroupRow(row: GroupRow): GroupFlat {
 
 export function listGroupsFlat(): GroupFlat[] {
   const db = getDb()
+  const otherGuard = shouldIncludeOtherFiles() ? '' : ` AND a.media_type != 'other'`
   const rows = db
     .prepare(
       `SELECT g.*,
         (SELECT COUNT(*) FROM asset_groups ag
          JOIN assets a ON a.id = ag.asset_id
-         WHERE ag.group_id = g.id AND a.status = 'active') AS asset_count
+         WHERE ag.group_id = g.id AND a.status = 'active'${otherGuard}) AS asset_count
        FROM groups g
        ORDER BY g.sort_order ASC, g.created_at ASC`
     )
@@ -362,6 +384,7 @@ export function listGroupsFlat(): GroupFlat[] {
 
 export function listGroupTree(): GroupNode[] {
   const db = getDb()
+  const otherGuard = shouldIncludeOtherFiles() ? '' : ` AND a.media_type != 'other'`
   const rows = db
     .prepare(`SELECT * FROM groups ORDER BY sort_order ASC, created_at ASC`)
     .all() as unknown as GroupRow[]
@@ -372,7 +395,7 @@ export function listGroupTree(): GroupNode[] {
       `SELECT ag.group_id, ag.asset_id
        FROM asset_groups ag
        JOIN assets a ON a.id = ag.asset_id
-       WHERE a.status = 'active'`
+       WHERE a.status = 'active'${otherGuard}`
     )
     .all() as Array<{ group_id: number; asset_id: number }>
 
@@ -492,10 +515,11 @@ export function updateGroup(
     sortOrder,
     id
   )
+  const otherGuard = shouldIncludeOtherFiles() ? '' : ` AND a.media_type != 'other'`
   const updated = db
     .prepare(
       `SELECT g.*,
-        (SELECT COUNT(*) FROM asset_groups ag JOIN assets a ON a.id = ag.asset_id WHERE ag.group_id = g.id AND a.status = 'active') AS asset_count
+        (SELECT COUNT(*) FROM asset_groups ag JOIN assets a ON a.id = ag.asset_id WHERE ag.group_id = g.id AND a.status = 'active'${otherGuard}) AS asset_count
        FROM groups g WHERE g.id = ?`
     )
     .get(id) as unknown as GroupRow
@@ -505,6 +529,37 @@ export function updateGroup(
 export function deleteGroup(id: number): void {
   const db = getDb()
   db.prepare('DELETE FROM groups WHERE id = ?').run(id)
+}
+
+export function reorderGroup(id: number, targetParentId: number | null, orderedSiblingIds: number[]): void {
+  const db = getDb()
+  const row = db.prepare('SELECT id, parent_id FROM groups WHERE id = ?').get(id) as
+    | { id: number; parent_id: number | null }
+    | undefined
+  if (!row) return
+
+  // Guard against circular hierarchy: targetParentId cannot be self or any descendant of id
+  if (targetParentId != null) {
+    const descendants = new Set(getDescendantGroupIds(id))
+    if (descendants.has(targetParentId)) return
+  }
+
+  db.exec('BEGIN')
+  try {
+    db.prepare('UPDATE groups SET parent_id = ? WHERE id = ?').run(targetParentId, id)
+    const updateOrderStmt = db.prepare('UPDATE groups SET sort_order = ? WHERE id = ?')
+    const seen = new Set<number>()
+    let orderIdx = 0
+    for (const sid of orderedSiblingIds) {
+      if (seen.has(sid)) continue
+      seen.add(sid)
+      updateOrderStmt.run(orderIdx++, sid)
+    }
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
 }
 
 export function assignAssetsToGroups(assetIds: number[], groupIds: number[]): void {
@@ -567,6 +622,8 @@ interface AssetRow {
   text_snippet: string | null
   status: AssetStatus
   indexed_at: number
+  is_favorite?: number | null
+  dominant_colors?: string | null
   group_ids_csv?: string | null
 }
 
@@ -577,6 +634,17 @@ function mapAssetRow(row: AssetRow): Asset {
       extraMeta = JSON.parse(row.extra_meta)
     } catch {
       extraMeta = null
+    }
+  }
+  let dominantColors: string[] = []
+  if (row.dominant_colors) {
+    try {
+      const parsed = JSON.parse(row.dominant_colors)
+      if (Array.isArray(parsed)) {
+        dominantColors = parsed.filter((c): c is string => typeof c === 'string')
+      }
+    } catch {
+      dominantColors = []
     }
   }
   const groupIds = row.group_ids_csv
@@ -607,6 +675,8 @@ function mapAssetRow(row: AssetRow): Asset {
     textSnippet: row.text_snippet,
     status: row.status,
     indexedAt: Number(row.indexed_at),
+    isFavorite: Boolean(row.is_favorite),
+    dominantColors,
     groupIds
   }
 }
@@ -649,7 +719,13 @@ export function queryAssets(filter: AssetQueryFilter): AssetQueryResult {
     where.push(`a.status = 'active'`)
   }
 
-  if (filter.smartView === 'ungrouped') {
+  if (!shouldIncludeOtherFiles()) {
+    where.push(`a.media_type != 'other'`)
+  }
+
+  if (filter.smartView === 'favorites') {
+    where.push(`a.is_favorite = 1`)
+  } else if (filter.smartView === 'ungrouped') {
     where.push(`NOT EXISTS (SELECT 1 FROM asset_groups ag WHERE ag.asset_id = a.id)`)
   } else if (filter.smartView === 'recent') {
     const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000
@@ -661,6 +737,45 @@ export function queryAssets(filter: AssetQueryFilter): AssetQueryResult {
     const placeholders = filter.mediaTypes.map(() => '?').join(',')
     where.push(`a.media_type IN (${placeholders})`)
     params.push(...filter.mediaTypes)
+  }
+
+  if (filter.extensions && filter.extensions.length > 0) {
+    const normalizedExts = filter.extensions.map((e) => (e.startsWith('.') ? e.toLowerCase() : `.${e.toLowerCase()}`))
+    const placeholders = normalizedExts.map(() => '?').join(',')
+    where.push(`LOWER(a.ext) IN (${placeholders})`)
+    params.push(...normalizedExts)
+  }
+
+  if (filter.aspectFilter && filter.aspectFilter !== 'all') {
+    if (filter.aspectFilter === 'landscape') {
+      where.push(`a.width IS NOT NULL AND a.height IS NOT NULL AND a.height > 0 AND CAST(a.width AS REAL) / a.height > 1.12`)
+    } else if (filter.aspectFilter === 'portrait') {
+      where.push(`a.width IS NOT NULL AND a.height IS NOT NULL AND a.height > 0 AND CAST(a.width AS REAL) / a.height < 0.89`)
+    } else if (filter.aspectFilter === 'square') {
+      where.push(`a.width IS NOT NULL AND a.height IS NOT NULL AND a.height > 0 AND CAST(a.width AS REAL) / a.height >= 0.89 AND CAST(a.width AS REAL) / a.height <= 1.12`)
+    }
+  }
+
+  if (filter.sizeFilter && filter.sizeFilter !== 'all') {
+    const MB = 1024 * 1024
+    if (filter.sizeFilter === 'small') {
+      where.push(`a.file_size < ?`)
+      params.push(MB)
+    } else if (filter.sizeFilter === 'medium') {
+      where.push(`a.file_size >= ? AND a.file_size <= ?`)
+      params.push(MB, 20 * MB)
+    } else if (filter.sizeFilter === 'large') {
+      where.push(`a.file_size > ?`)
+      params.push(20 * MB)
+    }
+  }
+
+  if (filter.hasNoteOnly) {
+    where.push(`TRIM(a.note) != ''`)
+  }
+
+  if (filter.colorHex && filter.colorHex.trim()) {
+    where.push(`a.dominant_colors IS NOT NULL AND a.dominant_colors != '' AND a.dominant_colors != '[]'`)
   }
 
   if (filter.rootId != null) {
@@ -702,13 +817,24 @@ export function queryAssets(filter: AssetQueryFilter): AssetQueryResult {
     orderSql = `ORDER BY a.file_name COLLATE NOCASE ${dir}, a.id ${dir}`
   }
 
-  const sql = `
-    SELECT a.*
-    FROM assets a
-    ${whereClause}
-    ${orderSql}
-  `
-  const rows = db.prepare(sql).all(...params) as unknown as AssetRow[]
+  const targetColor = filter.colorHex?.trim() || null
+  const useSqlPagination =
+    typeof filter.limit === 'number' && filter.limit > 0 && filter.sortField !== 'name' && !targetColor
+  const offset = Math.max(0, Math.floor(filter.offset ?? 0))
+  const limit = typeof filter.limit === 'number' && filter.limit > 0 ? Math.floor(filter.limit) : 0
+
+  let total = 0
+  let rows: AssetRow[]
+  if (useSqlPagination) {
+    const countRow = db.prepare(`SELECT COUNT(*) AS c FROM assets a ${whereClause}`).get(...params) as { c: number }
+    total = Number(countRow?.c ?? 0)
+    rows = db
+      .prepare(`SELECT a.* FROM assets a ${whereClause} ${orderSql} LIMIT ? OFFSET ?`)
+      .all(...params, limit, offset) as unknown as AssetRow[]
+  } else {
+    rows = db.prepare(`SELECT a.* FROM assets a ${whereClause} ${orderSql}`).all(...params) as unknown as AssetRow[]
+    total = rows.length
+  }
 
   // Batch-load asset->group edges once instead of running an N+1 correlated subquery per asset row
   let groupsByAsset: Map<number, number[]> | null = null
@@ -733,7 +859,7 @@ export function queryAssets(filter: AssetQueryFilter): AssetQueryResult {
     }
   }
 
-  const items = rows.map((row) => {
+  let items = rows.map((row) => {
     const asset = mapAssetRow(row)
     if (groupsByAsset) {
       const gids = groupsByAsset.get(asset.id)
@@ -742,42 +868,79 @@ export function queryAssets(filter: AssetQueryFilter): AssetQueryResult {
     return asset
   })
 
-  // Apply true natural sort in JS when sorting by name (so img_2 < img_10, and Chinese pinyin/locale ordering)
-  if (filter.sortField === 'name') {
+  // Apply perceptual color similarity filtering & ranking when colorHex is active
+  if (targetColor) {
+    const COLOR_THRESHOLD_SQ = 26000
+    const scored: Array<{ asset: Asset; dist: number }> = []
+    for (const asset of items) {
+      if (!asset.dominantColors || asset.dominantColors.length === 0) continue
+      let best = Number.MAX_SAFE_INTEGER
+      for (let i = 0; i < asset.dominantColors.length; i++) {
+        // Weight earlier (more dominant) swatches slightly better
+        const d = hexColorDistanceSq(targetColor, asset.dominantColors[i]) + i * 900
+        if (d < best) best = d
+      }
+      if (best <= COLOR_THRESHOLD_SQ) {
+        scored.push({ asset, dist: best })
+      }
+    }
+    scored.sort((a, b) => a.dist - b.dist)
+    items = scored.map((s) => s.asset)
+    total = items.length
+  } else if (filter.sortField === 'name') {
     const sign = filter.sortOrder === 'asc' ? 1 : -1
     items.sort((a, b) => naturalCollator.compare(a.fileName, b.fileName) * sign)
   }
 
-  return { items, total: items.length }
+  if (!useSqlPagination && limit > 0) {
+    items = items.slice(offset, offset + limit)
+  }
+
+  const hasMore = limit > 0 ? offset + items.length < total : false
+  return { items, total, hasMore }
 }
 
 export function getLibraryStats(): LibraryStats {
   const db = getDb()
   const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000
+  const includeOther = shouldIncludeOtherFiles()
+  const otherWhere = includeOther ? '' : ` AND media_type != 'other'`
+  const otherWhereA = includeOther ? '' : ` AND a.media_type != 'other'`
 
-  // Single aggregated pass for totalActive, missingCount, hiddenCount, and recentCount
+  // Single aggregated pass for totalActive, favoriteCount, missingCount, hiddenCount, recentCount, and maskedOtherCount
   const summary = db
     .prepare(
       `SELECT
-         COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0) AS total_active,
-         COALESCE(SUM(CASE WHEN status = 'missing' THEN 1 ELSE 0 END), 0) AS missing_count,
-         COALESCE(SUM(CASE WHEN status = 'hidden' THEN 1 ELSE 0 END), 0) AS hidden_count,
-         COALESCE(SUM(CASE WHEN status = 'active' AND indexed_at >= ? THEN 1 ELSE 0 END), 0) AS recent_count
+         COALESCE(SUM(CASE WHEN status = 'active'${otherWhere} THEN 1 ELSE 0 END), 0) AS total_active,
+         COALESCE(SUM(CASE WHEN status = 'active' AND is_favorite = 1${otherWhere} THEN 1 ELSE 0 END), 0) AS favorite_count,
+         COALESCE(SUM(CASE WHEN status = 'missing'${otherWhere} THEN 1 ELSE 0 END), 0) AS missing_count,
+         COALESCE(SUM(CASE WHEN status = 'hidden'${otherWhere} THEN 1 ELSE 0 END), 0) AS hidden_count,
+         COALESCE(SUM(CASE WHEN status = 'active' AND indexed_at >= ?${otherWhere} THEN 1 ELSE 0 END), 0) AS recent_count,
+         COALESCE(SUM(CASE WHEN status = 'active' AND media_type = 'other' THEN 1 ELSE 0 END), 0) AS active_other_count
        FROM assets`
     )
-    .get(sevenDaysAgo) as { total_active: number; missing_count: number; hidden_count: number; recent_count: number }
+    .get(sevenDaysAgo) as {
+    total_active: number
+    favorite_count: number
+    missing_count: number
+    hidden_count: number
+    recent_count: number
+    active_other_count: number
+  }
 
   const totalActive = Number(summary.total_active ?? 0)
+  const favoriteCount = Number(summary.favorite_count ?? 0)
   const missingCount = Number(summary.missing_count ?? 0)
   const hiddenCount = Number(summary.hidden_count ?? 0)
   const recentCount = Number(summary.recent_count ?? 0)
+  const maskedOtherCount = includeOther ? 0 : Number(summary.active_other_count ?? 0)
 
   const ungroupedCount = Number(
     (
       db
         .prepare(
           `SELECT COUNT(*) AS c FROM assets a
-           WHERE a.status = 'active'
+           WHERE a.status = 'active'${otherWhereA}
            AND NOT EXISTS (SELECT 1 FROM asset_groups ag WHERE ag.asset_id = a.id)`
         )
         .get() as { c: number }
@@ -793,7 +956,7 @@ export function getLibraryStats(): LibraryStats {
     other: 0
   }
   const typeRows = db
-    .prepare(`SELECT media_type, COUNT(*) AS c FROM assets WHERE status = 'active' GROUP BY media_type`)
+    .prepare(`SELECT media_type, COUNT(*) AS c FROM assets WHERE status = 'active'${otherWhere} GROUP BY media_type`)
     .all() as Array<{ media_type: MediaType; c: number }>
   for (const r of typeRows) {
     byType[r.media_type] = Number(r.c)
@@ -801,20 +964,56 @@ export function getLibraryStats(): LibraryStats {
 
   const byRoot: Record<number, number> = {}
   const rootRows = db
-    .prepare(`SELECT root_id, COUNT(*) AS c FROM assets WHERE status = 'active' GROUP BY root_id`)
+    .prepare(`SELECT root_id, COUNT(*) AS c FROM assets WHERE status = 'active'${otherWhere} GROUP BY root_id`)
     .all() as Array<{ root_id: number; c: number }>
   for (const r of rootRows) {
     byRoot[Number(r.root_id)] = Number(r.c)
   }
 
+  const extensionsByType: Record<MediaType, Array<{ ext: string; count: number }>> = {
+    image: [],
+    video: [],
+    audio: [],
+    text: [],
+    model: [],
+    other: []
+  }
+  const extByTypeRows = db
+    .prepare(
+      `SELECT media_type, LOWER(ext) AS ext, COUNT(*) AS c
+       FROM assets
+       WHERE status = 'active' AND ext != ''${otherWhere}
+       GROUP BY media_type, LOWER(ext)
+       ORDER BY c DESC, ext ASC`
+    )
+    .all() as Array<{ media_type: MediaType; ext: string; c: number }>
+
+  const extTotalMap = new Map<string, number>()
+  for (const r of extByTypeRows) {
+    const count = Number(r.c)
+    if (extensionsByType[r.media_type]) {
+      extensionsByType[r.media_type].push({ ext: r.ext, count })
+    }
+    extTotalMap.set(r.ext, (extTotalMap.get(r.ext) ?? 0) + count)
+  }
+
+  const extensions = Array.from(extTotalMap.entries())
+    .map(([ext, count]) => ({ ext, count }))
+    .sort((a, b) => b.count - a.count || a.ext.localeCompare(b.ext))
+    .slice(0, 36)
+
   return {
     totalActive,
+    favoriteCount,
     ungroupedCount,
     recentCount,
     missingCount,
     hiddenCount,
+    maskedOtherCount,
     byType,
-    byRoot
+    byRoot,
+    extensions,
+    extensionsByType
   }
 }
 
@@ -852,6 +1051,163 @@ export function setAssetsStatus(ids: number[], status: AssetStatus): void {
   try {
     for (const id of ids) {
       stmt.run(status, id)
+    }
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+}
+
+export function setAssetsFavorite(ids: number[], isFavorite: boolean): void {
+  if (ids.length === 0) return
+  const db = getDb()
+  const val = isFavorite ? 1 : 0
+  const stmt = db.prepare('UPDATE assets SET is_favorite = ? WHERE id = ?')
+  db.exec('BEGIN')
+  try {
+    for (const id of ids) {
+      stmt.run(val, id)
+    }
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+}
+
+export function updateAssetDominantColors(id: number, colors: string[]): void {
+  const db = getDb()
+  db.prepare('UPDATE assets SET dominant_colors = ? WHERE id = ?').run(JSON.stringify(colors), id)
+}
+
+export function getAssetsMissingColors(
+  limit = 400
+): Array<{ id: number; thumbPath: string | null; filePath: string; mediaType: MediaType }> {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      `SELECT id, thumb_path, file_path, media_type
+       FROM assets
+       WHERE status = 'active'
+         AND media_type IN ('image', 'video')
+         AND (dominant_colors IS NULL OR dominant_colors = '')
+       LIMIT ?`
+    )
+    .all(limit) as Array<{ id: number; thumb_path: string | null; file_path: string; media_type: MediaType }>
+  return rows.map((r) => ({
+    id: Number(r.id),
+    thumbPath: r.thumb_path,
+    filePath: r.file_path,
+    mediaType: r.media_type
+  }))
+}
+
+export function findDuplicateAssetGroups(): DuplicateGroup[] {
+  const db = getDb()
+  const includeOther = shouldIncludeOtherFiles()
+  const otherWhere = includeOther ? '' : ` AND media_type != 'other'`
+  const otherWhereA = includeOther ? '' : ` AND a.media_type != 'other'`
+  const dupFps = db
+    .prepare(
+      `SELECT fingerprint, COUNT(*) AS c, MAX(file_size) AS fsize
+       FROM assets
+       WHERE status = 'active'${otherWhere}
+         AND fingerprint IS NOT NULL
+         AND fingerprint != ''
+         AND file_size > 0
+       GROUP BY fingerprint
+       HAVING COUNT(*) > 1
+       ORDER BY (COUNT(*) - 1) * MAX(file_size) DESC
+       LIMIT 200`
+    )
+    .all() as Array<{ fingerprint: string; c: number; fsize: number }>
+
+  if (dupFps.length === 0) return []
+
+  const placeholders = dupFps.map(() => '?').join(',')
+  const fpValues = dupFps.map((d) => d.fingerprint)
+  const assetRows = db
+    .prepare(
+      `SELECT a.*,
+        (SELECT GROUP_CONCAT(ag.group_id) FROM asset_groups ag WHERE ag.asset_id = a.id) AS group_ids_csv
+       FROM assets a
+       WHERE a.status = 'active'${otherWhereA} AND a.fingerprint IN (${placeholders})
+       ORDER BY a.indexed_at ASC, a.id ASC`
+    )
+    .all(...fpValues) as unknown as AssetRow[]
+
+  const byFp = new Map<string, Asset[]>()
+  for (const row of assetRows) {
+    const asset = mapAssetRow(row)
+    if (!asset.fingerprint) continue
+    let list = byFp.get(asset.fingerprint)
+    if (!list) {
+      list = []
+      byFp.set(asset.fingerprint, list)
+    }
+    list.push(asset)
+  }
+
+  const groups: DuplicateGroup[] = []
+  for (const d of dupFps) {
+    const items = byFp.get(d.fingerprint) ?? []
+    if (items.length > 1) {
+      groups.push({
+        fingerprint: d.fingerprint,
+        fileSize: Number(d.fsize ?? 0),
+        count: items.length,
+        items
+      })
+    }
+  }
+  return groups
+}
+
+/**
+ * Losslessly merges group memberships, favorite status, and unique Markdown notes
+ * from duplicate assets into `keepId` before removing the duplicate records.
+ */
+export function mergeDuplicateMetadata(keepId: number, removeIds: number[]): void {
+  const validRemove = removeIds.filter((id) => id !== keepId)
+  if (validRemove.length === 0) return
+  const db = getDb()
+
+  const keepAsset = getAssetById(keepId)
+  if (!keepAsset) return
+
+  const noteParts: string[] = []
+  const seenNotes = new Set<string>()
+  const addNote = (n: string) => {
+    const trimmed = (n || '').trim()
+    if (!trimmed || seenNotes.has(trimmed)) return
+    seenNotes.add(trimmed)
+    noteParts.push(trimmed)
+  }
+  addNote(keepAsset.note)
+
+  const mergedGroups = new Set<number>(keepAsset.groupIds)
+  let anyFavorite = keepAsset.isFavorite
+
+  for (const rid of validRemove) {
+    const dup = getAssetById(rid)
+    if (!dup) continue
+    addNote(dup.note)
+    for (const gid of dup.groupIds) mergedGroups.add(gid)
+    if (dup.isFavorite) anyFavorite = true
+  }
+
+  db.exec('BEGIN')
+  try {
+    db.prepare('UPDATE assets SET note = ?, is_favorite = ? WHERE id = ?').run(
+      noteParts.join('\n\n---\n\n'),
+      anyFavorite ? 1 : 0,
+      keepId
+    )
+    const now = Date.now()
+    const insGroup = db.prepare('INSERT OR IGNORE INTO asset_groups (asset_id, group_id, created_at) VALUES (?, ?, ?)')
+    for (const gid of mergedGroups) {
+      insGroup.run(keepId, gid, now)
     }
     db.exec('COMMIT')
   } catch (err) {

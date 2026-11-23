@@ -1,21 +1,39 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { app, BrowserWindow, Menu, nativeImage, nativeTheme, protocol, Tray } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  globalShortcut,
+  Menu,
+  nativeImage,
+  nativeTheme,
+  protocol,
+  screen,
+  Tray
+} from 'electron'
 import { closeDatabase, initDatabase } from './db'
 import { getAllSettings } from './db/repositories'
 import { MEDIA_SCHEME, registerMediaProtocol } from './protocol'
 import { registerIpcHandlers } from './ipc'
 import { watcherManager } from './indexer/watcher'
 import { indexScanner } from './indexer/scanner'
+import { thumbnailQueue } from './indexer/thumbnailer'
 import { cloudUpdater } from './updater'
 import { cadWorkerPool } from './indexer/cad'
 import type { BackdropStyle } from '@shared/types'
 
 let mainWindowRef: BrowserWindow | null = null
+let quickSearchWindowRef: BrowserWindow | null = null
 let appTray: Tray | null = null
 let isQuitting = false
 let hasShownTrayBalloon = false
+let registeredQuickSearchShortcut: string | null = null
+let lastAutoUpdateCheckAt = 0
+let updateCheckInterval: ReturnType<typeof setInterval> | null = null
+
+const AUTO_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000 // 6 hours
+const AUTO_UPDATE_WAKE_MIN_GAP_MS = 4 * 60 * 60 * 1000 // 4 hours on tray wake
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
@@ -126,6 +144,14 @@ function createTrayIconImage() {
   return nativeImage.createEmpty()
 }
 
+function triggerSilentUpdateCheckIfDue(minGapMs = 0): void {
+  if (!getAllSettings().autoCheckUpdates) return
+  const now = Date.now()
+  if (minGapMs > 0 && now - lastAutoUpdateCheckAt < minGapMs) return
+  lastAutoUpdateCheckAt = now
+  cloudUpdater.checkForUpdates({ silent: true }).catch(() => undefined)
+}
+
 export function showAndFocusMainWindow(): void {
   if (!mainWindowRef || mainWindowRef.isDestroyed()) {
     mainWindowRef = createMainWindow({ forceShow: true })
@@ -136,8 +162,121 @@ export function showAndFocusMainWindow(): void {
   }
   if (!mainWindowRef.isVisible()) {
     mainWindowRef.show()
+    triggerSilentUpdateCheckIfDue(AUTO_UPDATE_WAKE_MIN_GAP_MS)
   }
   mainWindowRef.focus()
+}
+
+function createQuickSearchWindow(): BrowserWindow {
+  const win = new BrowserWindow({
+    width: 680,
+    height: 500,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    show: false,
+    hasShadow: false,
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  })
+
+  win.on('blur', () => {
+    if (!win.isDestroyed() && win.isVisible()) {
+      win.hide()
+    }
+  })
+
+  win.on('closed', () => {
+    if (quickSearchWindowRef === win) {
+      quickSearchWindowRef = null
+    }
+  })
+
+  if (process.env.ELECTRON_RENDERER_URL) {
+    const sep = process.env.ELECTRON_RENDERER_URL.includes('?') ? '&' : '?'
+    win.loadURL(`${process.env.ELECTRON_RENDERER_URL}${sep}mode=quicksearch`)
+  } else {
+    win.loadFile(path.join(__dirname, '../renderer/index.html'), {
+      query: { mode: 'quicksearch' }
+    })
+  }
+
+  quickSearchWindowRef = win
+  return win
+}
+
+export function toggleQuickSearchWindow(): void {
+  if (!quickSearchWindowRef || quickSearchWindowRef.isDestroyed()) {
+    createQuickSearchWindow()
+  }
+  const win = quickSearchWindowRef!
+  if (win.isVisible()) {
+    win.hide()
+    return
+  }
+  // Center on the display currently holding the user's cursor
+  const cursor = screen.getCursorScreenPoint()
+  const display = screen.getDisplayNearestPoint(cursor)
+  const { x, y, width, height } = display.workArea
+  const winW = 680
+  const winH = 500
+  const targetX = Math.round(x + (width - winW) / 2)
+  const targetY = Math.round(y + Math.max(48, (height - winH) * 0.22))
+  win.setBounds({ x: targetX, y: targetY, width: winW, height: winH })
+  win.show()
+  win.focus()
+  win.webContents.send('event:quicksearch-opened')
+}
+
+export function hideQuickSearchWindow(): void {
+  if (quickSearchWindowRef && !quickSearchWindowRef.isDestroyed() && quickSearchWindowRef.isVisible()) {
+    quickSearchWindowRef.hide()
+  }
+}
+
+export function openAssetInMainWindow(assetId: number): void {
+  hideQuickSearchWindow()
+  showAndFocusMainWindow()
+  if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+    mainWindowRef.webContents.send('event:focus-asset', assetId)
+  }
+}
+
+export function syncQuickSearchShortcut(enabled: boolean, shortcut: string): { ok: boolean; error?: string } {
+  if (registeredQuickSearchShortcut) {
+    try {
+      globalShortcut.unregister(registeredQuickSearchShortcut)
+    } catch {
+      // ignore
+    }
+    registeredQuickSearchShortcut = null
+  }
+  if (!enabled) {
+    hideQuickSearchWindow()
+    return { ok: true }
+  }
+  const accel = (shortcut || 'Alt+Space').trim()
+  if (!accel) return { ok: false, error: '快捷键不能为空' }
+  try {
+    const ok = globalShortcut.register(accel, () => {
+      toggleQuickSearchWindow()
+    })
+    if (ok) {
+      registeredQuickSearchShortcut = accel
+      return { ok: true }
+    }
+    return { ok: false, error: `快捷键 ${accel} 可能已被系统或其他软件占用` }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : '注册全局快捷键失败' }
+  }
 }
 
 function ensureAppTray(): void {
@@ -306,6 +445,7 @@ if (gotSingleInstanceLock) {
 
     const settings = getAllSettings()
     syncAutoLaunch(settings.autoLaunch)
+    syncQuickSearchShortcut(Boolean(settings.quickSearchEnabled), settings.quickSearchShortcut || 'Alt+Space')
     if (settings.closeToTray) {
       ensureAppTray()
     }
@@ -316,23 +456,48 @@ if (gotSingleInstanceLock) {
       indexScanner.scanSource().catch(() => undefined)
     }
 
+    // Low-priority background dominant-color backfill for existing image libraries
+    setTimeout(() => {
+      thumbnailQueue.backfillMissingColors().catch(() => undefined)
+    }, 5500)
+
     if (settings.autoCheckUpdates) {
       mainWin.webContents.once('did-finish-load', () => {
         setTimeout(() => {
-          if (getAllSettings().autoCheckUpdates) {
-            cloudUpdater.checkForUpdates({ silent: true }).catch(() => undefined)
-          }
+          triggerSilentUpdateCheckIfDue(0)
         }, 3000)
       })
     }
+
+    // Lightweight periodic silent update check every 6 hours while tray-resident
+    if (updateCheckInterval) clearInterval(updateCheckInterval)
+    updateCheckInterval = setInterval(() => {
+      triggerSilentUpdateCheckIfDue(AUTO_UPDATE_INTERVAL_MS - 60_000)
+    }, AUTO_UPDATE_INTERVAL_MS)
 
     app.on('activate', () => {
       showAndFocusMainWindow()
     })
   })
 
+  app.on('will-quit', () => {
+    try {
+      globalShortcut.unregisterAll()
+    } catch {
+      // ignore
+    }
+  })
+
   app.on('before-quit', () => {
     isQuitting = true
+    if (updateCheckInterval) {
+      clearInterval(updateCheckInterval)
+      updateCheckInterval = null
+    }
+    if (quickSearchWindowRef && !quickSearchWindowRef.isDestroyed()) {
+      quickSearchWindowRef.destroy()
+      quickSearchWindowRef = null
+    }
     destroyAppTray()
     watcherManager.stopAll()
     cadWorkerPool.dispose()

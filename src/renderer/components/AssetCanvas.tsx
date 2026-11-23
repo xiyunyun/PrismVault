@@ -3,6 +3,7 @@ import { useShallow } from 'zustand/react/shallow'
 import {
   Check,
   ChevronRight,
+  Columns2,
   Copy,
   Eye,
   ExternalLink,
@@ -10,6 +11,8 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  Heart,
+  Image as ImageIcon,
   Plus,
   SearchX,
   Tag,
@@ -94,12 +97,20 @@ export const AssetCanvas: React.FC<AssetCanvasProps> = ({ hidden = false }) => {
     gridAspectRatio,
     gridFitMode,
     cardSize,
+    videoHoverPreview,
     smartView,
     groupId,
     selectedIds,
+    totalAssets,
+    hasMoreAssets,
+    loadingMore,
+    loadMoreAssets,
     selectAsset,
     clearSelection,
     setPreviewAssetId,
+    toggleFavorite,
+    openCompare,
+    setInternalDragAssetIds,
     resetFilters,
     playingAudioId,
     setPlayingAudioId,
@@ -115,12 +126,20 @@ export const AssetCanvas: React.FC<AssetCanvasProps> = ({ hidden = false }) => {
       gridAspectRatio: s.settings.gridAspectRatio,
       gridFitMode: s.settings.gridFitMode,
       cardSize: s.settings.cardSize,
+      videoHoverPreview: s.settings.videoHoverPreview,
       smartView: s.smartView,
       groupId: s.groupId,
       selectedIds: s.selectedIds,
+      totalAssets: s.totalAssets,
+      hasMoreAssets: s.hasMoreAssets,
+      loadingMore: s.loadingMore,
+      loadMoreAssets: s.loadMoreAssets,
       selectAsset: s.selectAsset,
       clearSelection: s.clearSelection,
       setPreviewAssetId: s.setPreviewAssetId,
+      toggleFavorite: s.toggleFavorite,
+      openCompare: s.openCompare,
+      setInternalDragAssetIds: s.setInternalDragAssetIds,
       resetFilters: s.resetFilters,
       playingAudioId: s.playingAudioId,
       setPlayingAudioId: s.setPlayingAudioId,
@@ -334,8 +353,15 @@ export const AssetCanvas: React.FC<AssetCanvasProps> = ({ hidden = false }) => {
   }, [layoutItems, maxItemHeight, scrollTop, viewport.height])
 
   const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
-    const top = e.currentTarget.scrollTop
+    const el = e.currentTarget
+    const top = el.scrollTop
     savedScrollTopRef.current = top
+    if (el.scrollHeight - top - el.clientHeight < 950) {
+      const s = useLibraryStore.getState()
+      if (s.hasMoreAssets && !s.loadingMore && !s.loading) {
+        s.loadMoreAssets()
+      }
+    }
     if (scrollRafRef.current != null) return
     scrollRafRef.current = requestAnimationFrame(() => {
       scrollRafRef.current = null
@@ -370,12 +396,47 @@ export const AssetCanvas: React.FC<AssetCanvasProps> = ({ hidden = false }) => {
     [setPreviewAssetId]
   )
 
-  const handleCardDragStart = useCallback((e: React.DragEvent, asset: Asset) => {
-    const curSelected = useLibraryStore.getState().selectedIds
-    const idsToDrag = curSelected.includes(asset.id) ? curSelected : [asset.id]
-    e.dataTransfer.setData('application/x-xiyun-assets', JSON.stringify(idsToDrag))
-    e.dataTransfer.effectAllowed = 'copy'
-  }, [])
+  const handleCardDragStart = useCallback(
+    (e: React.DragEvent, asset: Asset) => {
+      const state = useLibraryStore.getState()
+      const curSelected = state.selectedIds
+      const idsToDrag = curSelected.includes(asset.id) ? curSelected : [asset.id]
+      const idSet = new Set(idsToDrag)
+      const filePaths = state.assets.filter((a) => idSet.has(a.id)).map((a) => a.filePath)
+
+      // Track internal drag IDs so LeftSidebar groups can accept drops while Native OS Drag-Out
+      // lets the user drag real files directly out into Photoshop / Blender / AutoCAD / WeChat / Explorer!
+      setInternalDragAssetIds(idsToDrag)
+      const clearDragState = () => {
+        setTimeout(() => {
+          useLibraryStore.getState().setInternalDragAssetIds([])
+        }, 120)
+        window.removeEventListener('mouseup', clearDragState, true)
+        window.removeEventListener('drop', clearDragState, true)
+        window.removeEventListener('dragend', clearDragState, true)
+      }
+      window.addEventListener('mouseup', clearDragState, true)
+      window.addEventListener('drop', clearDragState, true)
+      window.addEventListener('dragend', clearDragState, true)
+
+      if (filePaths.length > 0 && typeof window.api.system.startDragOut === 'function') {
+        e.preventDefault()
+        window.api.system.startDragOut(filePaths, asset.thumbPath)
+        return
+      }
+      e.dataTransfer.setData('application/x-xiyun-assets', JSON.stringify(idsToDrag))
+      e.dataTransfer.effectAllowed = 'copy'
+    },
+    [setInternalDragAssetIds]
+  )
+
+  const handleCardToggleFavorite = useCallback(
+    (e: React.MouseEvent, asset: Asset) => {
+      e.stopPropagation()
+      toggleFavorite([asset.id])
+    },
+    [toggleFavorite]
+  )
 
   const handleOpenContextMenu = useCallback(
     (e: React.MouseEvent, asset: Asset) => {
@@ -652,15 +713,36 @@ export const AssetCanvas: React.FC<AssetCanvasProps> = ({ hidden = false }) => {
                   mediaHeight={item.mediaHeight}
                   selected={selectedSet.has(item.asset.id)}
                   isPlayingAudio={playingAudioId === item.asset.id}
+                  videoHoverPreview={videoHoverPreview !== false}
                   onSelect={handleCardSelect}
                   onDoubleClick={handleCardDoubleClick}
                   onContextMenu={handleOpenContextMenu}
                   onDragStart={handleCardDragStart}
                   onToggleAudioPlay={handleToggleAudioPlay}
+                  onToggleFavorite={handleCardToggleFavorite}
                 />
               </div>
             ))}
           </div>
+          {hasMoreAssets && (
+            <div className="py-4 flex items-center justify-center">
+              <button
+                type="button"
+                disabled={loadingMore}
+                onClick={() => loadMoreAssets()}
+                className="h-8 px-4 rounded-full border text-xs font-medium hover:bg-[var(--bg-hover)] disabled:opacity-60 cursor-pointer"
+                style={{
+                  backgroundColor: 'var(--bg-surface)',
+                  borderColor: 'var(--border-subtle)',
+                  color: 'var(--text-secondary)'
+                }}
+              >
+                {loadingMore
+                  ? '正在加载更多素材...'
+                  : `已加载 ${assets.length} / ${totalAssets} 项 · 点击或继续下滑加载更多`}
+              </button>
+            </div>
+          )}
         </>
       )}
 
@@ -733,6 +815,56 @@ export const AssetCanvas: React.FC<AssetCanvasProps> = ({ hidden = false }) => {
                 setContextMenu((prev) => (prev ? { ...prev, groupMenuOpen: false, hoveredGroupPath: [] } : null))
               }
               onClick={async () => {
+                const targetIds = getContextTargetIds(contextMenu.asset)
+                const paths = contextTargetAssets.map((a) => a.filePath)
+                setContextMenu(null)
+                const res = await window.api.system.copyFilesToClipboard(paths, 'file')
+                showToast(
+                  res.ok ? `已复制 ${targetIds.length} 个文件到剪贴板（可粘贴到微信/资源管理器/软件）` : res.error || '复制文件失败',
+                  res.ok ? 'success' : 'error'
+                )
+              }}
+              className="w-full px-3 h-9 flex items-center justify-between hover:bg-[var(--bg-hover)] cursor-pointer text-left"
+            >
+              <span className="flex items-center gap-2.5">
+                <Copy className="w-4 h-4" style={{ color: 'var(--text-muted)' }} />
+                <span>复制文件 ({getContextTargetIds(contextMenu.asset).length})</span>
+              </span>
+              <span className="text-[0.68rem] font-mono" style={{ color: 'var(--text-muted)' }}>
+                Ctrl+C
+              </span>
+            </button>
+
+            {contextMenu.asset.mediaType === 'image' && contextTargetAssets.length === 1 && (
+              <button
+                type="button"
+                onMouseEnter={() =>
+                  contextMenu.groupMenuOpen &&
+                  setContextMenu((prev) => (prev ? { ...prev, groupMenuOpen: false, hoveredGroupPath: [] } : null))
+                }
+                onClick={async () => {
+                  const p = contextMenu.asset.filePath
+                  setContextMenu(null)
+                  const res = await window.api.system.copyFilesToClipboard([p], 'image')
+                  showToast(
+                    res.ok ? '已复制图片画面到剪贴板（可直接粘贴到 PS/PPT/微信）' : res.error || '复制图片失败',
+                    res.ok ? 'success' : 'error'
+                  )
+                }}
+                className="w-full px-3 h-9 flex items-center gap-2.5 hover:bg-[var(--bg-hover)] cursor-pointer text-left"
+              >
+                <ImageIcon className="w-4 h-4" style={{ color: 'var(--text-muted)' }} />
+                <span>复制图片画面</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onMouseEnter={() =>
+                contextMenu.groupMenuOpen &&
+                setContextMenu((prev) => (prev ? { ...prev, groupMenuOpen: false, hoveredGroupPath: [] } : null))
+              }
+              onClick={async () => {
                 await window.api.system.copyPath(contextMenu.asset.filePath)
                 showToast('已复制文件完整路径', 'success')
                 setContextMenu(null)
@@ -741,6 +873,66 @@ export const AssetCanvas: React.FC<AssetCanvasProps> = ({ hidden = false }) => {
             >
               <Copy className="w-4 h-4" style={{ color: 'var(--text-muted)' }} />
               <span>复制物理路径</span>
+            </button>
+
+            {contextTargetAssets.length >= 2 &&
+              contextTargetAssets.length <= 4 &&
+              contextTargetAssets.every((a) => a.mediaType === 'image') && (
+                <button
+                  type="button"
+                  onMouseEnter={() =>
+                    contextMenu.groupMenuOpen &&
+                    setContextMenu((prev) => (prev ? { ...prev, groupMenuOpen: false, hoveredGroupPath: [] } : null))
+                  }
+                  onClick={() => {
+                    const ids = contextTargetAssets.map((a) => a.id)
+                    setContextMenu(null)
+                    openCompare(ids)
+                  }}
+                  className="w-full px-3 h-9 flex items-center gap-2.5 hover:bg-[var(--bg-hover)] cursor-pointer text-left font-medium"
+                  style={{ color: 'var(--accent)' }}
+                >
+                  <Columns2 className="w-4 h-4" />
+                  <span>并排 / 卷帘对比 ({contextTargetAssets.length} 张)</span>
+                </button>
+              )}
+
+            <button
+              type="button"
+              onMouseEnter={() =>
+                contextMenu.groupMenuOpen &&
+                setContextMenu((prev) => (prev ? { ...prev, groupMenuOpen: false, hoveredGroupPath: [] } : null))
+              }
+              onClick={async () => {
+                const targetIds = getContextTargetIds(contextMenu.asset)
+                setContextMenu(null)
+                await toggleFavorite(targetIds)
+              }}
+              className="w-full px-3 h-9 flex items-center justify-between hover:bg-[var(--bg-hover)] cursor-pointer text-left"
+            >
+              <span className="flex items-center gap-2.5">
+                <Heart
+                  className={`w-4 h-4 ${
+                    contextTargetAssets.length > 0 && contextTargetAssets.every((a) => a.isFavorite)
+                      ? 'fill-rose-500 text-rose-500'
+                      : ''
+                  }`}
+                  style={{
+                    color:
+                      contextTargetAssets.length > 0 && contextTargetAssets.every((a) => a.isFavorite)
+                        ? '#f43f5e'
+                        : 'var(--text-muted)'
+                  }}
+                />
+                <span>
+                  {contextTargetAssets.length > 0 && contextTargetAssets.every((a) => a.isFavorite)
+                    ? '取消收藏'
+                    : '添加到我的收藏'}
+                </span>
+              </span>
+              <span className="text-[0.68rem] font-mono" style={{ color: 'var(--text-muted)' }}>
+                F
+              </span>
             </button>
 
             <div className="my-1 border-t" style={{ borderColor: 'var(--border-subtle)' }} />
