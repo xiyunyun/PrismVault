@@ -13,7 +13,13 @@ import { extractDominantColors } from './colorExtractor'
 import { extractVideoFrame } from './ffmpeg'
 import { renderPsdToWebp } from './psd'
 import { renderCadToWebp } from './cad'
-import { isCadExt, isPsdExt, type MediaType } from '@shared/mediaTypes'
+import {
+  isCadExt,
+  isPsdExt,
+  needsTranscodedImagePreview,
+  stripThumbVersion,
+  type MediaType
+} from '@shared/mediaTypes'
 import type { ThumbProgress } from '@shared/types'
 
 export interface ThumbJob {
@@ -110,26 +116,42 @@ class ThumbnailQueue {
     if (this.colorBackfillRunning) return 0
     this.colorBackfillRunning = true
     let processed = 0
+    const visitedIds = new Set<number>()
     try {
       const cacheDir = getThumbCacheDir()
-      const missing = getAssetsMissingColors(500)
-      for (const item of missing) {
-        const candidatePath =
-          item.thumbPath && fs.existsSync(path.join(cacheDir, item.thumbPath))
-            ? path.join(cacheDir, item.thumbPath)
+      while (true) {
+        const batch = getAssetsMissingColors(300).filter((item) => !visitedIds.has(item.id))
+        if (batch.length === 0) break
+
+        for (const item of batch) {
+          visitedIds.add(item.id)
+          const cleanThumb = stripThumbVersion(item.thumbPath)
+          const hasThumbOnDisk = Boolean(cleanThumb && fs.existsSync(path.join(cacheDir, cleanThumb)))
+          if (
+            !hasThumbOnDisk &&
+            (item.mediaType === 'video' || needsTranscodedImagePreview(item.ext)) &&
+            fs.existsSync(item.filePath)
+          ) {
+            // Leave dominant_colors NULL until thumbnailQueue generates its WebP thumbnail
+            continue
+          }
+
+          const candidatePath = hasThumbOnDisk
+            ? path.join(cacheDir, cleanThumb)
             : item.mediaType === 'image' && fs.existsSync(item.filePath)
               ? item.filePath
               : null
-        if (!candidatePath) {
-          updateAssetDominantColors(item.id, [])
-          continue
-        }
-        const colors = await extractDominantColors(candidatePath, 5)
-        updateAssetDominantColors(item.id, colors)
-        processed++
-        // Yield every 8 items so UI & SQLite stay silky smooth
-        if (processed % 8 === 0) {
-          await new Promise((r) => setTimeout(r, 15))
+          if (!candidatePath) {
+            updateAssetDominantColors(item.id, [])
+            continue
+          }
+          const colors = await extractDominantColors(candidatePath, 5)
+          updateAssetDominantColors(item.id, colors)
+          processed++
+          // Yield every 8 items so UI & SQLite stay silky smooth
+          if (processed % 8 === 0) {
+            await new Promise((r) => setTimeout(r, 15))
+          }
         }
       }
     } finally {
@@ -211,6 +233,8 @@ class ThumbnailQueue {
             .webp({ quality: 82 })
             .toFile(outFile)
           generated = fs.existsSync(outFile)
+        } else {
+          mergeAssetExtraMeta(job.assetId, { noEmbeddedCover: true })
         }
       } catch {
         generated = false
@@ -218,14 +242,15 @@ class ThumbnailQueue {
     }
 
     if (generated) {
-      updateAssetThumbAndDims(job.assetId, thumbRelName, width, height)
+      const versionedThumb = `${thumbRelName}?v=${Date.now()}`
+      updateAssetThumbAndDims(job.assetId, versionedThumb, width, height)
       let dominantColors: string[] | undefined
       if (job.mediaType === 'image' || job.mediaType === 'video') {
         dominantColors = await extractDominantColors(outFile, 5)
         updateAssetDominantColors(job.assetId, dominantColors)
       }
       for (const listener of this.listeners) {
-        listener({ assetId: job.assetId, thumbPath: thumbRelName, width, height, dominantColors })
+        listener({ assetId: job.assetId, thumbPath: versionedThumb, width, height, dominantColors })
       }
     }
   }

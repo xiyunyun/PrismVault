@@ -264,6 +264,12 @@ const MainWorkspaceApp: React.FC = () => {
       focusAssetById(assetId).catch(() => undefined)
     })
 
+    const unsubDragOutEnded = window.api.events.onDragOutEnded(() => {
+      useLibraryStore.getState().setInternalDragAssetIds([])
+      dragDepthRef.current = 0
+      setExternalDragOver(false)
+    })
+
     const unsubChanged = window.api.events.onAssetsChanged(() => {
       scheduleRefresh()
     })
@@ -290,6 +296,7 @@ const MainWorkspaceApp: React.FC = () => {
       unsubThumb()
       unsubThumbProgress()
       unsubFocusAsset()
+      unsubDragOutEnded()
       unsubChanged()
       unsubUpdate()
     }

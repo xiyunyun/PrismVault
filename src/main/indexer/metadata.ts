@@ -1,7 +1,7 @@
 import fs from 'fs/promises'
 import sharp from 'sharp'
 import { parseFile as parseAudioFile } from 'music-metadata'
-import { isCadExt, isPsdExt, isReadableTextExt, type MediaType } from '@shared/mediaTypes'
+import { decodeTextBuffer, isCadExt, isPsdExt, isReadableTextExt, type MediaType } from '@shared/mediaTypes'
 import type { AssetExtraMeta } from '@shared/types'
 import { probeVideo } from './ffmpeg'
 import { extractPsdMetadata } from './psd'
@@ -16,6 +16,7 @@ export interface ExtractedMetadata {
 }
 
 const MAX_SNIPPET_BYTES = 4096
+const MAX_FULL_TEXT_STATS_BYTES = 1024 * 1024 // 1MB
 
 export async function extractAssetMetadata(
   filePath: string,
@@ -105,20 +106,36 @@ export async function extractAssetMetadata(
   if (mediaType === 'text' && isReadableTextExt(ext)) {
     let handle: fs.FileHandle | null = null
     try {
+      const st = await fs.stat(filePath)
+      if (st.size <= MAX_FULL_TEXT_STATS_BYTES) {
+        const fullBuf = await fs.readFile(filePath)
+        const fullText = decodeTextBuffer(fullBuf, false).replace(/\0/g, '')
+        const lines = fullText.split(/\r?\n/)
+        const snippet = lines.slice(0, 12).join('\n').slice(0, 600)
+        return {
+          width: null,
+          height: null,
+          duration: null,
+          extraMeta: {
+            lineCount: fullText.length === 0 ? 0 : lines.length,
+            charCount: fullText.length
+          },
+          textSnippet: snippet
+        }
+      }
+
       handle = await fs.open(filePath, 'r')
       const buf = Buffer.alloc(MAX_SNIPPET_BYTES)
       const { bytesRead } = await handle.read(buf, 0, MAX_SNIPPET_BYTES, 0)
-      const raw = buf.subarray(0, bytesRead).toString('utf8').replace(/\0/g, '')
+      const raw = decodeTextBuffer(buf.subarray(0, bytesRead), st.size > bytesRead).replace(/\0/g, '')
       const lines = raw.split(/\r?\n/)
       const snippet = lines.slice(0, 12).join('\n').slice(0, 600)
       return {
         width: null,
         height: null,
         duration: null,
-        extraMeta: {
-          lineCount: lines.length,
-          charCount: raw.length
-        },
+        // Omit misleading partial 4KB lineCount/charCount when file exceeds 1MB
+        extraMeta: null,
         textSnippet: snippet
       }
     } catch {

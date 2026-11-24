@@ -203,12 +203,13 @@ export function registerMediaProtocol(): void {
         if (!stat) {
           return new Response('Thumbnail not found', { status: 404 })
         }
+        const hasVersionParam = url.searchParams.has('v')
         return new Response(createSafeFileStream(thumbPath), {
           status: 200,
           headers: {
             'Content-Type': 'image/webp',
             'Content-Length': String(stat.size),
-            'Cache-Control': 'public, max-age=31536000, immutable',
+            'Cache-Control': hasVersionParam ? 'public, max-age=31536000, immutable' : 'no-cache',
             'Access-Control-Allow-Origin': '*'
           }
         })
@@ -308,7 +309,8 @@ export function registerMediaProtocol(): void {
                 'Content-Length': String(chunkSize),
                 'Content-Range': `bytes ${start}-${end}/${total}`,
                 'Accept-Ranges': 'bytes',
-                'Cache-Control': 'no-cache'
+                'Cache-Control': 'no-cache',
+                'Access-Control-Allow-Origin': '*'
               }
             })
           }

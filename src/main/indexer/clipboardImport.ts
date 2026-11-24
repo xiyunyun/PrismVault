@@ -18,15 +18,18 @@ import {
   assignAssetsToGroups,
   createSourceRoot,
   getAssetById,
+  listSourceRoots,
   shouldIncludeOtherFiles,
   updateSettings
 } from '../db/repositories'
 import {
   classifyExtension,
+  decodeTextBuffer,
   getMimeType,
   isPsdExt,
   isReadableTextExt,
-  normalizeExt
+  normalizeExt,
+  stripThumbVersion
 } from '@shared/mediaTypes'
 import type {
   Asset,
@@ -207,26 +210,53 @@ async function expandToRegularFiles(
   return { files: results, ignoredOtherCount }
 }
 
+function isPathWithinRoot(filePath: string, rootDir: string): boolean {
+  const f = path.resolve(filePath).toLowerCase()
+  const r = path.resolve(rootDir).toLowerCase()
+  if (f === r) return true
+  const prefix = r.endsWith(path.sep) ? r : r + path.sep
+  return f.startsWith(prefix)
+}
+
+function findContainingIndexedRoot(
+  filePath: string,
+  clipDir: string
+): { rootId: number; isClipDir: boolean } | null {
+  const resolved = path.resolve(filePath)
+  const resolvedClip = path.resolve(clipDir)
+  if (isPathWithinRoot(resolved, resolvedClip)) {
+    return { rootId: 0, isClipDir: true }
+  }
+  const roots = listSourceRoots()
+  let bestMatch: { rootId: number; len: number } | null = null
+  for (const r of roots) {
+    const rp = path.resolve(r.path)
+    if (rp.toLowerCase() === resolvedClip.toLowerCase()) continue
+    if (isPathWithinRoot(resolved, rp)) {
+      if (!bestMatch || rp.length > bestMatch.len) {
+        bestMatch = { rootId: r.id, len: rp.length }
+      }
+    }
+  }
+  return bestMatch ? { rootId: bestMatch.rootId, isClipDir: false } : null
+}
+
+/**
+ * Strictly checks conflicts ONLY inside the managed `clipDir` import folder.
+ * Never matches same-named files across other indexed drives/folders so "Replace"
+ * can never overwrite user originals outside `clipDir`.
+ */
 function findConflictingAsset(fileName: string, clipDir: string, includeOtherFiles: boolean): Asset | null {
   const db = getDb()
   const otherGuard = includeOtherFiles ? '' : ` AND media_type != 'other'`
-  // Prefer an exact match inside the import storage folder first
   const exactInClip = path.join(clipDir, fileName)
   const inClipRow = db
-    .prepare(`SELECT id FROM assets WHERE status = 'active'${otherGuard} AND lower(file_path) = lower(?) LIMIT 1`)
+    .prepare(
+      `SELECT id FROM assets WHERE status IN ('active', 'hidden')${otherGuard} AND lower(file_path) = lower(?) LIMIT 1`
+    )
     .get(exactInClip) as { id: number } | undefined
   if (inClipRow) {
     return getAssetById(Number(inClipRow.id))
-  }
-
-  // Otherwise match any active asset in the library with the exact same filename (case-insensitive)
-  const sameNameRow = db
-    .prepare(
-      `SELECT id FROM assets WHERE status = 'active'${otherGuard} AND lower(file_name) = lower(?) ORDER BY modified_at DESC LIMIT 1`
-    )
-    .get(fileName) as { id: number } | undefined
-  if (sameNameRow) {
-    return getAssetById(Number(sameNameRow.id))
   }
   return null
 }
@@ -307,10 +337,13 @@ async function generateQuickPreviewForIncoming(
   if (mediaType === 'text' && isReadableTextExt(ext)) {
     let handle: fsp.FileHandle | null = null
     try {
+      const st = await fsp.stat(filePath)
       handle = await fsp.open(filePath, 'r')
       const buf = Buffer.alloc(1024)
       const { bytesRead } = await handle.read(buf, 0, 1024, 0)
-      const snippet = buf.subarray(0, bytesRead).toString('utf8').replace(/\0/g, '').slice(0, 320)
+      const snippet = decodeTextBuffer(buf.subarray(0, bytesRead), st.size > bytesRead)
+        .replace(/\0/g, '')
+        .slice(0, 320)
       return { thumbDataUrl: null, width: null, height: null, textSnippet: snippet }
     } catch {
       // ignore
@@ -402,8 +435,9 @@ async function replaceExistingAssetFile(
   }
 
   // Delete stale cached thumb so a fresh one is generated immediately
-  if (existing.thumbPath) {
-    const oldThumb = path.join(getThumbCacheDir(), existing.thumbPath)
+  const cleanOldThumb = stripThumbVersion(existing.thumbPath)
+  if (cleanOldThumb) {
+    const oldThumb = path.join(getThumbCacheDir(), cleanOldThumb)
     await fsp.unlink(oldThumb).catch(() => undefined)
   }
 
@@ -486,11 +520,24 @@ export async function inspectImportPaths(inputPaths: string[]): Promise<Clipboar
   const clipDir = path.resolve(getClipboardDir())
   const totalBytes = files.reduce((sum, f) => sum + f.size, 0)
   const conflicts: ImportConflictItem[] = []
+  const seenConflictNames = new Set<string>()
 
   for (const f of files) {
+    // Files already residing inside clipDir or another mounted source_root are linked/grouped in-place (zero-copy)
+    if (findContainingIndexedRoot(f.filePath, clipDir)) {
+      continue
+    }
+
     const fileName = path.basename(f.filePath)
+    const lowerName = fileName.toLowerCase()
+    if (seenConflictNames.has(lowerName)) {
+      // Subsequent duplicate filenames within the same incoming batch will auto-number via makeUniquePath
+      continue
+    }
+
     const existing = findConflictingAsset(fileName, clipDir, includeOther)
     if (existing) {
+      seenConflictNames.add(lowerName)
       const ext = normalizeExt(path.extname(fileName))
       const quick = await generateQuickPreviewForIncoming(f.filePath, ext)
       conflicts.push({
@@ -570,24 +617,63 @@ export async function commitClipboardImport(opts: {
   let skippedCount = 0
 
   const includeOther = shouldIncludeOtherFiles()
+  const db = getDb()
 
   if (Array.isArray(opts.filePaths) && opts.filePaths.length > 0) {
+    const replacedNamesInBatch = new Set<string>()
+
     for (const srcPath of opts.filePaths) {
       try {
-        if (!fs.existsSync(srcPath) || !fs.statSync(srcPath).isFile()) {
+        const resolvedSrc = path.resolve(srcPath)
+        if (!fs.existsSync(resolvedSrc) || !fs.statSync(resolvedSrc).isFile()) {
           skippedCount++
           continue
         }
 
-        const ext = normalizeExt(path.extname(srcPath))
+        const ext = normalizeExt(path.extname(resolvedSrc))
         if (!includeOther && classifyExtension(ext) === 'other') {
           skippedCount++
           continue
         }
 
-        const fileName = path.basename(srcPath)
-        const existing = findConflictingAsset(fileName, clipDir, includeOther)
-        const resolution = opts.resolutions?.[path.resolve(srcPath).toLowerCase()] ?? opts.resolutions?.[srcPath.toLowerCase()]
+        // Zero-copy fast path: if the file is already inside clipDir or any mounted source_root,
+        // reuse or index it in-place and assign to targetGroupId without duplicating onto clipDir!
+        const indexedRootHit = findContainingIndexedRoot(resolvedSrc, clipDir)
+        if (indexedRootHit) {
+          const existingRow = db
+            .prepare(`SELECT id, status FROM assets WHERE lower(file_path) = lower(?) LIMIT 1`)
+            .get(resolvedSrc) as { id: number; status: string } | undefined
+          if (existingRow) {
+            const eid = Number(existingRow.id)
+            if (existingRow.status === 'missing') {
+              db.prepare(`UPDATE assets SET status = 'active' WHERE id = ?`).run(eid)
+            }
+            if (opts.targetGroupId != null) {
+              assignAssetsToGroups([eid], [opts.targetGroupId])
+            }
+            const loaded = getAssetById(eid)
+            if (loaded) {
+              resultAssets.push(loaded)
+              importedCount++
+            }
+          } else {
+            const ownerRootId = indexedRootHit.isClipDir ? rootId : indexedRootHit.rootId
+            const indexed = await indexImportedFile(ownerRootId, resolvedSrc, opts.targetGroupId)
+            if (indexed) {
+              resultAssets.push(indexed)
+              importedCount++
+            }
+          }
+          continue
+        }
+
+        const fileName = path.basename(resolvedSrc)
+        const lowerName = fileName.toLowerCase()
+        const existing = !replacedNamesInBatch.has(lowerName)
+          ? findConflictingAsset(fileName, clipDir, includeOther)
+          : null
+        const resolution =
+          opts.resolutions?.[resolvedSrc.toLowerCase()] ?? opts.resolutions?.[srcPath.toLowerCase()]
 
         if (existing && resolution === 'skip') {
           skippedCount++
@@ -595,7 +681,8 @@ export async function commitClipboardImport(opts: {
         }
 
         if (existing && resolution === 'replace') {
-          const updated = await replaceExistingAssetFile(existing, srcPath, opts.targetGroupId)
+          replacedNamesInBatch.add(lowerName)
+          const updated = await replaceExistingAssetFile(existing, resolvedSrc, opts.targetGroupId)
           if (updated) {
             resultAssets.push(updated)
             replacedCount++
@@ -603,10 +690,10 @@ export async function commitClipboardImport(opts: {
           continue
         }
 
-        // Default or 'keep_both': copy to unique non-colliding path in import folder
+        // Default, 'keep_both', or intra-batch duplicate filename: copy to unique non-colliding path in clipDir
         const destPath = makeUniquePath(clipDir, fileName)
-        await fsp.copyFile(srcPath, destPath)
-        const srcStat = await fsp.stat(srcPath)
+        await fsp.copyFile(resolvedSrc, destPath)
+        const srcStat = await fsp.stat(resolvedSrc)
         await fsp.utimes(destPath, srcStat.atime, srcStat.mtime).catch(() => undefined)
         const asset = await indexImportedFile(rootId, destPath, opts.targetGroupId)
         if (asset) {

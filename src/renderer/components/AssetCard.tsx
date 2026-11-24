@@ -15,7 +15,14 @@ import {
   StickyNote
 } from 'lucide-react'
 import type { Asset, GridFitMode, ViewMode } from '@shared/types'
-import { formatDuration, formatFileSize, isCadExt, isPdfExt, isPsdExt } from '@shared/mediaTypes'
+import {
+  formatDuration,
+  formatFileSize,
+  isCadExt,
+  isPdfExt,
+  isPsdExt,
+  needsTranscodedImagePreview
+} from '@shared/mediaTypes'
 import { getFileMediaUrl, getThumbMediaUrl } from '../utils/mediaUrl'
 
 interface AssetCardProps {
@@ -96,6 +103,32 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(
     const renderMediaPreview = () => {
       if (asset.mediaType === 'image') {
         const isPsd = isPsdExt(asset.ext)
+        // Avoid triggering concurrent 2560px full-file PSD/TIFF transcoding on grid cards before thumbnailQueue finishes
+        if (!thumbUrl && needsTranscodedImagePreview(asset.ext)) {
+          return (
+            <div
+              className="w-full h-full relative flex flex-col items-center justify-center gap-2 p-3"
+              style={{
+                background: isPsd
+                  ? 'linear-gradient(145deg, rgba(49, 168, 255, 0.16) 0%, rgba(0, 30, 54, 0.55) 100%)'
+                  : 'linear-gradient(145deg, rgba(56, 189, 248, 0.14) 0%, rgba(30, 41, 59, 0.45) 100%)'
+              }}
+            >
+              <Layers className="w-9 h-9 opacity-80" style={{ color: isPsd ? '#31a8ff' : 'var(--accent)' }} />
+              <span className="text-xs font-mono opacity-80" style={{ color: 'var(--text-secondary)' }}>
+                {extBadge} 设计稿
+              </span>
+              {isPsd && (
+                <span
+                  className="absolute bottom-2 left-2 px-1.5 py-0.5 rounded text-xs font-bold tracking-wider shadow"
+                  style={{ backgroundColor: '#001e36', color: '#31a8ff', border: '1px solid rgba(49,168,255,0.45)' }}
+                >
+                  {extBadge}
+                </span>
+              )}
+            </div>
+          )
+        }
         const src = asset.ext === '.svg' || asset.ext === '.gif' ? fileUrl : thumbUrl || fileUrl
         return (
           <div className="w-full h-full relative">

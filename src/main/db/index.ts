@@ -170,37 +170,23 @@ export function initDatabase(): DatabaseSync {
 
     CREATE INDEX IF NOT EXISTS idx_asset_groups_group ON asset_groups(group_id);
 
-    CREATE VIRTUAL TABLE IF NOT EXISTS assets_fts USING fts5(
-      file_name,
-      note,
-      file_path,
-      content='assets',
-      content_rowid='id',
-      tokenize='unicode61'
-    );
-
-    CREATE TRIGGER IF NOT EXISTS assets_ai AFTER INSERT ON assets BEGIN
-      INSERT INTO assets_fts(rowid, file_name, note, file_path)
-      VALUES (new.id, new.file_name, new.note, new.file_path);
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS assets_ad AFTER DELETE ON assets BEGIN
-      INSERT INTO assets_fts(assets_fts, rowid, file_name, note, file_path)
-      VALUES ('delete', old.id, old.file_name, old.note, old.file_path);
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS assets_au AFTER UPDATE OF file_name, note, file_path ON assets BEGIN
-      INSERT INTO assets_fts(assets_fts, rowid, file_name, note, file_path)
-      VALUES ('delete', old.id, old.file_name, old.note, old.file_path);
-      INSERT INTO assets_fts(rowid, file_name, note, file_path)
-      VALUES (new.id, new.file_name, new.note, new.file_path);
-    END;
-
     CREATE TABLE IF NOT EXISTS app_settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
   `)
+
+  // Drop legacy unused FTS5 shadow table & write-amplifying triggers (all search uses indexed/escaped LIKE including CJK substrings)
+  try {
+    db.exec(`
+      DROP TRIGGER IF EXISTS assets_ai;
+      DROP TRIGGER IF EXISTS assets_ad;
+      DROP TRIGGER IF EXISTS assets_au;
+      DROP TABLE IF EXISTS assets_fts;
+    `)
+  } catch {
+    // ignore
+  }
 
   // Seamless schema migration for v0.1.0/v0.2.0 databases whose assets.media_type CHECK lacked 'model'
   try {
@@ -258,29 +244,10 @@ export function initDatabase(): DatabaseSync {
           CREATE INDEX IF NOT EXISTS idx_assets_status_root ON assets(status, root_id);
           CREATE INDEX IF NOT EXISTS idx_assets_status_indexed ON assets(status, indexed_at DESC);
 
-          CREATE TRIGGER IF NOT EXISTS assets_ai AFTER INSERT ON assets BEGIN
-            INSERT INTO assets_fts(rowid, file_name, note, file_path)
-            VALUES (new.id, new.file_name, new.note, new.file_path);
-          END;
-
-          CREATE TRIGGER IF NOT EXISTS assets_ad AFTER DELETE ON assets BEGIN
-            INSERT INTO assets_fts(assets_fts, rowid, file_name, note, file_path)
-            VALUES ('delete', old.id, old.file_name, old.note, old.file_path);
-          END;
-
-          CREATE TRIGGER IF NOT EXISTS assets_au AFTER UPDATE OF file_name, note, file_path ON assets BEGIN
-            INSERT INTO assets_fts(assets_fts, rowid, file_name, note, file_path)
-            VALUES ('delete', old.id, old.file_name, old.note, old.file_path);
-            INSERT INTO assets_fts(rowid, file_name, note, file_path)
-            VALUES (new.id, new.file_name, new.note, new.file_path);
-          END;
-
           UPDATE assets
           SET media_type = 'model'
           WHERE media_type = 'other'
             AND LOWER(ext) IN ('.obj', '.fbx', '.glb', '.gltf', '.stl', '.ply', '.dwg', '.dxf');
-
-          INSERT INTO assets_fts(assets_fts) VALUES('rebuild');
         `)
         db.exec('COMMIT;')
       } catch (err) {

@@ -202,7 +202,9 @@ pnpm run release:manifest
 
 ## 📄 开源协议
 
-本项目基于 [MIT License](./LICENSE) 开源，由 **熙云 (Xiyun)** 创建与维护。
+本项目主体代码基于 [MIT License](./LICENSE) 开源，由 **熙云 (Xiyun)** 创建与维护。
+
+> **第三方组件协议说明**：用于离线解析 DWG/DXF 图纸的独立工作线程所依赖的 `@mlightcad/libredwg-web`（基于 GNU LibreDWG）遵循 **GPL-3.0** 协议；视频流探测与缩略图抽帧通过外部调用本机 `FFmpeg` 可执行程序完成。
 
 - 项目主页：[https://github.com/xiyunyun/PrismVault](https://github.com/xiyunyun/PrismVault)
 - 问题反馈：[GitHub Issues](https://github.com/xiyunyun/PrismVault/issues)

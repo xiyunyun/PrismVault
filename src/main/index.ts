@@ -10,6 +10,7 @@ import {
   nativeTheme,
   protocol,
   screen,
+  shell,
   Tray
 } from 'electron'
 import { closeDatabase, initDatabase } from './db'
@@ -29,14 +30,16 @@ let appTray: Tray | null = null
 let isQuitting = false
 let hasShownTrayBalloon = false
 let registeredQuickSearchShortcut: string | null = null
+let lastQuickSearchShortcutError: string | null = null
 let lastAutoUpdateCheckAt = 0
 let updateCheckInterval: ReturnType<typeof setInterval> | null = null
 
 const AUTO_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000 // 6 hours
 const AUTO_UPDATE_WAKE_MIN_GAP_MS = 4 * 60 * 60 * 1000 // 4 hours on tray wake
 
+const isQuitRunningArg = process.argv.includes('--quit-running')
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
-if (!gotSingleInstanceLock) {
+if (!gotSingleInstanceLock || isQuitRunningArg) {
   app.quit()
 }
 
@@ -91,6 +94,11 @@ export function syncWindowAppearance(theme: 'dark' | 'light', backdropStyle: Bac
 
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) continue
+    // Exclude the transparent frameless Spotlight overlay from main-window Mica / titleBarOverlay mutations
+    if (win === quickSearchWindowRef) {
+      win.webContents.send('event:quicksearch-opened')
+      continue
+    }
     if (micaCapable) {
       // Keep DWM Mica initialized cleanly from window creation so dynamic CSS switching never turns black
       if (typeof win.setBackgroundMaterial === 'function') {
@@ -167,6 +175,37 @@ export function showAndFocusMainWindow(): void {
   mainWindowRef.focus()
 }
 
+function isAllowedRendererNavigation(url: string): boolean {
+  const devBase = process.env.ELECTRON_RENDERER_URL
+  if (devBase) {
+    try {
+      const allowedOrigin = new URL(devBase).origin
+      return new URL(url).origin === allowedOrigin
+    } catch {
+      return url.startsWith(devBase)
+    }
+  }
+  return url.startsWith('file://')
+}
+
+function hardenWebContents(win: BrowserWindow): void {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) {
+      shell.openExternal(url).catch(() => undefined)
+    }
+    return { action: 'deny' }
+  })
+
+  win.webContents.on('will-navigate', (e, url) => {
+    if (!isAllowedRendererNavigation(url)) {
+      e.preventDefault()
+      if (/^https?:\/\//i.test(url)) {
+        shell.openExternal(url).catch(() => undefined)
+      }
+    }
+  })
+}
+
 function createQuickSearchWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 680,
@@ -187,6 +226,8 @@ function createQuickSearchWindow(): BrowserWindow {
       sandbox: false
     }
   })
+
+  hardenWebContents(win)
 
   win.on('blur', () => {
     if (!win.isDestroyed() && win.isVisible()) {
@@ -233,7 +274,15 @@ export function toggleQuickSearchWindow(): void {
   win.setBounds({ x: targetX, y: targetY, width: winW, height: winH })
   win.show()
   win.focus()
-  win.webContents.send('event:quicksearch-opened')
+  if (win.webContents.isLoading()) {
+    win.webContents.once('did-finish-load', () => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('event:quicksearch-opened')
+      }
+    })
+  } else {
+    win.webContents.send('event:quicksearch-opened')
+  }
 }
 
 export function hideQuickSearchWindow(): void {
@@ -245,8 +294,29 @@ export function hideQuickSearchWindow(): void {
 export function openAssetInMainWindow(assetId: number): void {
   hideQuickSearchWindow()
   showAndFocusMainWindow()
-  if (mainWindowRef && !mainWindowRef.isDestroyed()) {
-    mainWindowRef.webContents.send('event:focus-asset', assetId)
+  const win = mainWindowRef
+  if (!win || win.isDestroyed()) return
+  if (win.webContents.isLoading()) {
+    win.webContents.once('did-finish-load', () => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('event:focus-asset', assetId)
+      }
+    })
+  } else {
+    win.webContents.send('event:focus-asset', assetId)
+  }
+}
+
+export function getQuickSearchShortcutStatus(): {
+  registered: boolean
+  shortcut: string
+  error: string | null
+} {
+  const s = getAllSettings()
+  return {
+    registered: Boolean(registeredQuickSearchShortcut),
+    shortcut: registeredQuickSearchShortcut || (s.quickSearchShortcut || 'Alt+Space').trim(),
+    error: s.quickSearchEnabled ? lastQuickSearchShortcutError : null
   }
 }
 
@@ -260,22 +330,29 @@ export function syncQuickSearchShortcut(enabled: boolean, shortcut: string): { o
     registeredQuickSearchShortcut = null
   }
   if (!enabled) {
+    lastQuickSearchShortcutError = null
     hideQuickSearchWindow()
     return { ok: true }
   }
   const accel = (shortcut || 'Alt+Space').trim()
-  if (!accel) return { ok: false, error: '快捷键不能为空' }
+  if (!accel) {
+    lastQuickSearchShortcutError = '快捷键不能为空'
+    return { ok: false, error: lastQuickSearchShortcutError }
+  }
   try {
     const ok = globalShortcut.register(accel, () => {
       toggleQuickSearchWindow()
     })
     if (ok) {
       registeredQuickSearchShortcut = accel
+      lastQuickSearchShortcutError = null
       return { ok: true }
     }
-    return { ok: false, error: `快捷键 ${accel} 可能已被系统或其他软件占用` }
+    lastQuickSearchShortcutError = `快捷键 ${accel} 已被系统或其他软件占用，请切换其他组合`
+    return { ok: false, error: lastQuickSearchShortcutError }
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : '注册全局快捷键失败' }
+    lastQuickSearchShortcutError = err instanceof Error ? err.message : '注册全局快捷键失败'
+    return { ok: false, error: lastQuickSearchShortcutError }
   }
 }
 
@@ -388,6 +465,8 @@ function createMainWindow(opts?: { forceShow?: boolean }): BrowserWindow {
     }
   })
 
+  hardenWebContents(win)
+
   if (micaCapable && typeof win.setBackgroundMaterial === 'function') {
     try {
       win.setBackgroundMaterial('mica')
@@ -431,8 +510,13 @@ function createMainWindow(opts?: { forceShow?: boolean }): BrowserWindow {
   return win
 }
 
-if (gotSingleInstanceLock) {
-  app.on('second-instance', () => {
+if (gotSingleInstanceLock && !isQuitRunningArg) {
+  app.on('second-instance', (_event, commandLine) => {
+    if (Array.isArray(commandLine) && commandLine.includes('--quit-running')) {
+      isQuitting = true
+      app.quit()
+      return
+    }
     showAndFocusMainWindow()
   })
 

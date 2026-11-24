@@ -26,6 +26,7 @@ import {
   X
 } from 'lucide-react'
 import { useLibraryStore } from '../store/useLibraryStore'
+import { SAFE_MARKDOWN_COMPONENTS } from '../utils/markdown'
 import { flattenGroupTree, getFileMediaUrl, getThumbMediaUrl } from '../utils/mediaUrl'
 import { detectImageTransparency } from './InlinePreview'
 import {
@@ -33,7 +34,8 @@ import {
   formatDuration,
   formatFileSize,
   isCadExt,
-  MEDIA_TYPE_LABELS
+  MEDIA_TYPE_LABELS,
+  needsTranscodedImagePreview
 } from '@shared/mediaTypes'
 import type { Asset } from '@shared/types'
 
@@ -116,6 +118,19 @@ export const RightInspector: React.FC<RightInspectorProps> = ({ width }) => {
       setMiniHasAlpha(false)
     }
   }, [singleAsset?.id])
+
+  // Sync external note updates (e.g. duplicate merge or batch append) when user has no unsaved local edits
+  useEffect(() => {
+    if (
+      singleAsset &&
+      activeAssetIdRef.current === singleAsset.id &&
+      saveState !== 'saving' &&
+      !pendingNoteRef.current &&
+      singleAsset.note !== draftNote
+    ) {
+      setDraftNote(singleAsset.note)
+    }
+  }, [singleAsset?.id, singleAsset?.note, saveState])
 
   useEffect(() => {
     return () => {
@@ -431,6 +446,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({ width }) => {
 
   const renderMiniPreview = () => {
     if (asset.mediaType === 'image') {
+      if (!thumbUrl && needsTranscodedImagePreview(asset.ext)) {
+        return <Layers className="w-10 h-10" style={{ color: '#31a8ff' }} />
+      }
       const src = asset.ext === '.svg' || asset.ext === '.gif' ? fileUrl : thumbUrl || fileUrl
       return (
         <img
@@ -776,7 +794,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({ width }) => {
           >
             {draftNote.trim() ? (
               <div className="markdown-body">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{draftNote}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={SAFE_MARKDOWN_COMPONENTS}>
+                  {draftNote}
+                </ReactMarkdown>
               </div>
             ) : (
               <div className="text-xs italic cursor-pointer" style={{ color: 'var(--text-muted)' }}>

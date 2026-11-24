@@ -8,7 +8,7 @@ import {
   listSourceRoots,
   updateSourceRoot
 } from '../db/repositories'
-import { classifyExtension, getMimeType, normalizeExt } from '@shared/mediaTypes'
+import { classifyExtension, getMimeType, isCadExt, normalizeExt } from '@shared/mediaTypes'
 import type { ScanProgress, SourceRoot } from '@shared/types'
 import { computeFingerprint } from './fingerprint'
 import { extractAssetMetadata } from './metadata'
@@ -19,6 +19,8 @@ type ChangedListener = () => void
 
 class IndexScanner {
   private isRunning = false
+  private pendingScanAll = false
+  private pendingRootIds = new Set<number>()
   private progressListeners = new Set<ProgressListener>()
   private changedListeners = new Set<ChangedListener>()
   private lastProgress: ScanProgress = {
@@ -68,12 +70,21 @@ class IndexScanner {
   }
 
   async scanSource(rootId?: number): Promise<void> {
-    if (this.isRunning) return
+    if (this.isRunning) {
+      if (rootId == null) {
+        this.pendingScanAll = true
+      } else {
+        this.pendingRootIds.add(rootId)
+      }
+      return
+    }
     this.isRunning = true
 
-    const roots: SourceRoot[] = rootId != null
-      ? ([getSourceRootById(rootId)].filter(Boolean) as SourceRoot[])
-      : listSourceRoots()
+    if (rootId == null) {
+      this.pendingScanAll = true
+    } else {
+      this.pendingRootIds.add(rootId)
+    }
 
     const progress: ScanProgress = {
       running: true,
@@ -85,17 +96,30 @@ class IndexScanner {
     }
     this.emitProgress({ ...progress })
 
-    const settings = getAllSettings()
     let anyChanges = false
 
     try {
-      for (const root of roots) {
-        progress.rootId = root.id
-        progress.rootName = root.alias
-        this.emitProgress({ ...progress })
+      while (this.pendingScanAll || this.pendingRootIds.size > 0) {
+        let roots: SourceRoot[]
+        if (this.pendingScanAll) {
+          this.pendingScanAll = false
+          this.pendingRootIds.clear()
+          roots = listSourceRoots()
+        } else {
+          const queuedIds = Array.from(this.pendingRootIds)
+          this.pendingRootIds.clear()
+          roots = queuedIds.map((id) => getSourceRootById(id)).filter((r): r is SourceRoot => Boolean(r))
+        }
 
-        const changed = await this.scanSingleRoot(root, settings.includeOtherFiles, progress)
-        if (changed) anyChanges = true
+        const settings = getAllSettings()
+        for (const root of roots) {
+          progress.rootId = root.id
+          progress.rootName = root.alias
+          this.emitProgress({ ...progress })
+
+          const changed = await this.scanSingleRoot(root, settings.includeOtherFiles, progress)
+          if (changed) anyChanges = true
+        }
       }
     } finally {
       this.isRunning = false
@@ -130,7 +154,7 @@ class IndexScanner {
     // Load existing assets in this root for O(1) incremental diff
     const existingRows = db
       .prepare(
-        `SELECT id, file_path, file_size, modified_at, fingerprint, status, thumb_path, media_type, ext, duration
+        `SELECT id, file_path, file_size, modified_at, fingerprint, status, thumb_path, media_type, ext, duration, extra_meta
          FROM assets WHERE root_id = ?`
       )
       .all(root.id) as Array<{
@@ -144,7 +168,28 @@ class IndexScanner {
       media_type: string
       ext: string
       duration: number | null
+      extra_meta: string | null
     }>
+
+    const allRoots = listSourceRoots()
+    const currentRootNorm = path.resolve(root.path).toLowerCase()
+    const otherRootDirs = new Set<string>()
+    const onlineRootIds = new Set<number>([root.id])
+    for (const sr of allRoots) {
+      const srNorm = path.resolve(sr.path).toLowerCase()
+      if (sr.id !== root.id && srNorm !== currentRootNorm) {
+        otherRootDirs.add(srNorm)
+      }
+      if (sr.id === root.id || fs.existsSync(sr.path)) {
+        onlineRootIds.add(sr.id)
+      }
+    }
+
+    // Prevent overlapping source roots from re-scanning files already owned by another source root
+    const otherPathRows = db
+      .prepare(`SELECT LOWER(file_path) AS p FROM assets WHERE root_id != ?`)
+      .all(root.id) as Array<{ p: string }>
+    const claimedByOtherRoots = new Set<string>(otherPathRows.map((r) => r.p))
 
     const byPath = new Map(existingRows.map((r) => [r.file_path.toLowerCase(), r]))
     const seenPaths = new Set<string>()
@@ -169,6 +214,7 @@ class IndexScanner {
         const fullPath = path.join(dir, entry.name)
 
         if (entry.isDirectory()) {
+          if (otherRootDirs.has(path.resolve(fullPath).toLowerCase())) continue
           await walk(fullPath)
         } else if (entry.isFile()) {
           const ext = normalizeExt(path.extname(entry.name))
@@ -202,14 +248,23 @@ class IndexScanner {
             }
             // Fast-skip unchanged files
             if (Number(existing.file_size) === size && Math.abs(Number(existing.modified_at) - mtimeMs) <= 1000) {
-              if (!existing.thumb_path && (mediaType === 'image' || mediaType === 'video' || mediaType === 'audio')) {
-                thumbnailQueue.enqueue({
-                  assetId: Number(existing.id),
-                  filePath: fullPath,
-                  ext,
-                  mediaType,
-                  duration: existing.duration
-                })
+              if (!existing.thumb_path) {
+                const audioConfirmedNoCover =
+                  mediaType === 'audio' && Boolean(existing.extra_meta?.includes('"noEmbeddedCover":true'))
+                const canEnqueueThumb =
+                  mediaType === 'image' ||
+                  mediaType === 'video' ||
+                  (mediaType === 'audio' && !audioConfirmedNoCover) ||
+                  (mediaType === 'model' && isCadExt(ext))
+                if (canEnqueueThumb) {
+                  thumbnailQueue.enqueue({
+                    assetId: Number(existing.id),
+                    filePath: fullPath,
+                    ext,
+                    mediaType,
+                    duration: existing.duration
+                  })
+                }
               }
               continue
             }
@@ -245,7 +300,7 @@ class IndexScanner {
               mediaType,
               duration: meta.duration
             })
-          } else {
+          } else if (!claimedByOtherRoots.has(key)) {
             newFiles.push({ filePath: fullPath, fileName: entry.name, ext, stat })
           }
         }
@@ -276,16 +331,34 @@ class IndexScanner {
       changed = true
     }
 
-    // Step 2: Build lookup of all currently missing assets across the entire library for fingerprint relink
+    const disappearedSet = new Set<number>(disappearedIds)
+    let localRelinkedInThisRoot = 0
+
+    // Step 2: Build lookup of missing assets ONLY from currently online roots (never steal records from unplugged external drives!)
+    // Prioritize same-root missing records first so in-root moves/renames always match before cross-drive moves.
     const missingCandidates = db
-      .prepare(`SELECT id, fingerprint, file_size FROM assets WHERE status = 'missing' AND fingerprint IS NOT NULL`)
-      .all() as Array<{ id: number; fingerprint: string; file_size: number }>
+      .prepare(`SELECT id, root_id, fingerprint, file_size FROM assets WHERE status = 'missing' AND fingerprint IS NOT NULL`)
+      .all() as Array<{ id: number; root_id: number; fingerprint: string; file_size: number }>
+
+    const sameRootByFp = new Map<string, number[]>()
+    const otherOnlineByFp = new Map<string, number[]>()
+    for (const m of missingCandidates) {
+      const mRootId = Number(m.root_id)
+      if (!onlineRootIds.has(mRootId)) continue
+      const targetMap = mRootId === root.id ? sameRootByFp : otherOnlineByFp
+      const list = targetMap.get(m.fingerprint) ?? []
+      list.push(Number(m.id))
+      targetMap.set(m.fingerprint, list)
+    }
 
     const missingByFp = new Map<string, number[]>()
-    for (const m of missingCandidates) {
-      const list = missingByFp.get(m.fingerprint) ?? []
-      list.push(Number(m.id))
-      missingByFp.set(m.fingerprint, list)
+    for (const [fp, list] of sameRootByFp.entries()) {
+      missingByFp.set(fp, list)
+    }
+    for (const [fp, list] of otherOnlineByFp.entries()) {
+      const cur = missingByFp.get(fp)
+      if (cur) cur.push(...list)
+      else missingByFp.set(fp, list)
     }
 
     // Step 3: Process new files with bounded concurrency (4x) + batched SQLite transactions
@@ -379,6 +452,9 @@ class IndexScanner {
               relinkId
             )
             progress.relinked++
+            if (disappearedSet.has(relinkId)) {
+              localRelinkedInThisRoot++
+            }
             changed = true
             continue
           }
@@ -435,8 +511,8 @@ class IndexScanner {
       }
     }
 
-    // Count remaining newly missing
-    const stillMissing = disappearedIds.length - progress.relinked
+    // Count remaining newly missing in THIS root only
+    const stillMissing = Math.max(0, disappearedIds.length - localRelinkedInThisRoot)
     if (stillMissing > 0) {
       progress.missing += stillMissing
     }
@@ -468,9 +544,15 @@ class IndexScanner {
     }
 
     const db = getDb()
-    const existing = db.prepare('SELECT id, file_size, modified_at FROM assets WHERE file_path = ?').get(filePath) as
-      | { id: number; file_size: number; modified_at: number }
-      | undefined
+    const existing =
+      (db.prepare('SELECT id, file_size, modified_at FROM assets WHERE file_path = ?').get(filePath) as
+        | { id: number; file_size: number; modified_at: number }
+        | undefined) ??
+      (process.platform === 'win32'
+        ? (db
+            .prepare('SELECT id, file_size, modified_at FROM assets WHERE LOWER(file_path) = LOWER(?) LIMIT 1')
+            .get(filePath) as { id: number; file_size: number; modified_at: number } | undefined)
+        : undefined)
 
     const size = stat.size
     const mtimeMs = Math.floor(stat.mtimeMs)
@@ -562,9 +644,14 @@ class IndexScanner {
 
   markFileMissing(filePath: string): void {
     const db = getDb()
-    const res = db
+    let res = db
       .prepare(`UPDATE assets SET status = 'missing' WHERE file_path = ? AND status = 'active'`)
       .run(filePath)
+    if (Number(res.changes) === 0 && process.platform === 'win32') {
+      res = db
+        .prepare(`UPDATE assets SET status = 'missing' WHERE LOWER(file_path) = LOWER(?) AND status = 'active'`)
+        .run(filePath)
+    }
     if (Number(res.changes) > 0) {
       this.emitChanged()
     }

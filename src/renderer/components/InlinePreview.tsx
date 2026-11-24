@@ -25,6 +25,7 @@ import {
   ZoomOut
 } from 'lucide-react'
 import { useLibraryStore } from '../store/useLibraryStore'
+import { SAFE_MARKDOWN_COMPONENTS } from '../utils/markdown'
 import { getFileMediaUrl, getThumbMediaUrl } from '../utils/mediaUrl'
 import {
   formatDuration,
@@ -496,6 +497,10 @@ const ImageStage: React.FC<{
 export const InlinePreview: React.FC = () => {
   const {
     assets,
+    totalAssets,
+    hasMoreAssets,
+    loadingMore,
+    loadMoreAssets,
     previewWheelMode,
     previewAssetId,
     setPreviewAssetId,
@@ -506,6 +511,10 @@ export const InlinePreview: React.FC = () => {
   } = useLibraryStore(
     useShallow((s) => ({
       assets: s.assets,
+      totalAssets: s.totalAssets,
+      hasMoreAssets: s.hasMoreAssets,
+      loadingMore: s.loadingMore,
+      loadMoreAssets: s.loadMoreAssets,
       previewWheelMode: s.settings.previewWheelMode,
       previewAssetId: s.previewAssetId,
       setPreviewAssetId: s.setPreviewAssetId,
@@ -623,6 +632,13 @@ export const InlinePreview: React.FC = () => {
     }
   }, [asset?.id])
 
+  // Auto-prefetch next page when approaching the end of currently loaded assets during inline preview
+  useEffect(() => {
+    if (currentIndex >= 0 && currentIndex >= assets.length - 5 && hasMoreAssets && !loadingMore) {
+      loadMoreAssets().catch(() => undefined)
+    }
+  }, [currentIndex, assets.length, hasMoreAssets, loadingMore, loadMoreAssets])
+
   const goPrev = useCallback(() => {
     if (currentIndex > 0) {
       const prev = assets[currentIndex - 1]
@@ -631,13 +647,23 @@ export const InlinePreview: React.FC = () => {
     }
   }, [assets, currentIndex, selectAsset, setPreviewAssetId])
 
-  const goNext = useCallback(() => {
+  const goNext = useCallback(async () => {
     if (currentIndex >= 0 && currentIndex < assets.length - 1) {
       const next = assets[currentIndex + 1]
       setPreviewAssetId(next.id)
       selectAsset(next.id)
+      return
     }
-  }, [assets, currentIndex, selectAsset, setPreviewAssetId])
+    if (currentIndex >= 0 && currentIndex === assets.length - 1 && hasMoreAssets && !loadingMore) {
+      await loadMoreAssets()
+      const latest = useLibraryStore.getState().assets
+      if (currentIndex < latest.length - 1) {
+        const next = latest[currentIndex + 1]
+        setPreviewAssetId(next.id)
+        selectAsset(next.id)
+      }
+    }
+  }, [assets, currentIndex, hasMoreAssets, loadingMore, loadMoreAssets, selectAsset, setPreviewAssetId])
 
   const handleThrottledWheelNavigate = useCallback(
     (dir: -1 | 1) => {
@@ -748,7 +774,7 @@ export const InlinePreview: React.FC = () => {
   const thumbUrl = getThumbMediaUrl(asset.thumbPath)
   const isFitScale = Math.abs(zoomScale - 1) < 0.02
   const hasPrev = currentIndex > 0
-  const hasNext = currentIndex < assets.length - 1
+  const hasNext = currentIndex < assets.length - 1 || hasMoreAssets
 
   const renderInlineContent = () => {
     if (asset.mediaType === 'image') {
@@ -881,7 +907,9 @@ export const InlinePreview: React.FC = () => {
               </div>
             ) : isMd && mdRenderMode === 'rendered' ? (
               <div className="markdown-body max-w-4xl mx-auto">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{textData?.content || ''}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={SAFE_MARKDOWN_COMPONENTS}>
+                  {textData?.content || ''}
+                </ReactMarkdown>
               </div>
             ) : (
               <pre
@@ -1012,7 +1040,7 @@ export const InlinePreview: React.FC = () => {
               className="px-2 text-xs font-mono tabular-nums border-x"
               style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
             >
-              {currentIndex + 1} / {assets.length}
+              {currentIndex + 1} / {Math.max(assets.length, totalAssets)}
             </span>
             <button
               type="button"

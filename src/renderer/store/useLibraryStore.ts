@@ -340,19 +340,53 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     set({ loading: true })
     try {
       const state = get()
-      // Keep already-loaded depth when refreshing in-place (capped reasonably so refreshes stay snappy)
-      const desiredLimit = Math.max(PAGE_SIZE, Math.min(state.assets.length || PAGE_SIZE, 2400))
+      const prevPreviewId = state.previewAssetId
+      const prevPreviewIdx = prevPreviewId != null ? state.assets.findIndex((a) => a.id === prevPreviewId) : -1
+      // Keep already-loaded pagination depth when refreshing in-place so deep browsing (>2400) never loses position
+      const desiredLimit = Math.max(PAGE_SIZE, Math.min(state.assets.length || PAGE_SIZE, 10000))
       const result = await window.api.assets.query(buildFilter(state, { limit: desiredLimit, offset: 0 }))
       if (seq !== querySeq) return
-      const validSet = new Set(result.items.map((a) => a.id))
+
+      let items = result.items
+      const validSet = new Set(items.map((a) => a.id))
+      let nextPreviewId: number | null =
+        prevPreviewId != null && validSet.has(prevPreviewId) ? prevPreviewId : null
+
+      if (prevPreviewId != null && nextPreviewId == null) {
+        const stillExists = await window.api.assets.getById(prevPreviewId)
+        if (seq !== querySeq) return
+        const inUnfilteredAll =
+          state.smartView === 'all' &&
+          !state.groupId &&
+          !state.rootId &&
+          !state.search.trim() &&
+          !state.colorHex &&
+          state.mediaTypes.length === 0 &&
+          state.extensions.length === 0 &&
+          state.aspectFilter === 'all' &&
+          state.sizeFilter === 'all' &&
+          !state.hasNoteOnly
+        if (stillExists && stillExists.status === 'active' && inUnfilteredAll) {
+          items = [...items, stillExists]
+          validSet.add(stillExists.id)
+          nextPreviewId = stillExists.id
+        } else if (items.length > 0 && prevPreviewIdx >= 0) {
+          // Smoothly advance to neighbor when current item leaves filtered view (e.g. unfavorited in Favorites or trashed)
+          nextPreviewId = items[Math.min(prevPreviewIdx, items.length - 1)].id
+        }
+      }
+
       set((s) => ({
-        assets: result.items,
+        assets: items,
         totalAssets: result.total,
         hasMoreAssets: result.hasMore,
         loading: false,
         loadingMore: false,
-        selectedIds: s.selectedIds.filter((id) => validSet.has(id)),
-        previewAssetId: s.previewAssetId != null && validSet.has(s.previewAssetId) ? s.previewAssetId : null,
+        selectedIds:
+          nextPreviewId != null && s.previewAssetId != null
+            ? [nextPreviewId]
+            : s.selectedIds.filter((id) => validSet.has(id)),
+        previewAssetId: nextPreviewId,
         compareAssetIds: s.compareAssetIds.filter((id) => validSet.has(id))
       }))
     } catch {
@@ -591,7 +625,12 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   setSelectedIds: (ids) => set({ selectedIds: ids }),
 
   selectAll: () => {
-    set((state) => ({ selectedIds: state.assets.map((a) => a.id) }))
+    const state = get()
+    const loadedIds = state.assets.map((a) => a.id)
+    set({ selectedIds: loadedIds })
+    if (state.hasMoreAssets && state.totalAssets > loadedIds.length) {
+      state.showToast(`已选中当前已加载的 ${loadedIds.length} 项（共 ${state.totalAssets} 项）`, 'info')
+    }
   },
 
   clearSelection: () => set({ selectedIds: [], lastClickedId: null }),

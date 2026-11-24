@@ -3,6 +3,7 @@ import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js'
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js'
 import { getModelFileMediaUrl } from './mediaUrl'
@@ -36,11 +37,15 @@ export function disposeThreeObject(root: THREE.Object3D): void {
     if (mat) {
       const mats = Array.isArray(mat) ? mat : [mat]
       for (const m of mats) {
-        const std = m as unknown as Record<string, unknown>
-        for (const key of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap', 'aoMap', 'alphaMap']) {
-          const tex = std[key] as THREE.Texture | undefined
-          if (tex && typeof tex.dispose === 'function') {
-            tex.dispose()
+        const record = m as unknown as Record<string, unknown>
+        for (const val of Object.values(record)) {
+          if (
+            val &&
+            typeof val === 'object' &&
+            (val as THREE.Texture).isTexture === true &&
+            typeof (val as THREE.Texture).dispose === 'function'
+          ) {
+            ;(val as THREE.Texture).dispose()
           }
         }
         m.dispose()
@@ -223,6 +228,7 @@ export async function loadThreeModel(
   } else if (lowerExt === '.glb' || lowerExt === '.gltf') {
     const gltfLoader = new GLTFLoader()
     gltfLoader.setResourcePath(resourceBase)
+    gltfLoader.setMeshoptDecoder(MeshoptDecoder)
     const gltf = await gltfLoader.loadAsync(modelUrl)
     loadedObject = gltf.scene
     animations = Array.isArray(gltf.animations) ? gltf.animations : []

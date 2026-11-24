@@ -18,6 +18,7 @@ const api: XiyunApi = {
     updateNote: (id, note) => ipcRenderer.invoke('assets:updateNote', id, note),
     batchAppendNote: (ids, text) => ipcRenderer.invoke('assets:batchAppendNote', ids, text),
     setStatus: (ids, status) => ipcRenderer.invoke('assets:setStatus', ids, status),
+    restoreAllHidden: () => ipcRenderer.invoke('assets:restoreAllHidden'),
     setFavorite: (ids, isFavorite) => ipcRenderer.invoke('assets:setFavorite', ids, isFavorite),
     moveToTrash: (ids) => ipcRenderer.invoke('assets:moveToTrash', ids),
     readTextContent: (id) => ipcRenderer.invoke('assets:readTextContent', id),
@@ -66,7 +67,8 @@ const api: XiyunApi = {
   },
   quickSearch: {
     hide: () => ipcRenderer.invoke('quickSearch:hide'),
-    openAssetInMain: (assetId) => ipcRenderer.invoke('quickSearch:openAssetInMain', assetId)
+    openAssetInMain: (assetId) => ipcRenderer.invoke('quickSearch:openAssetInMain', assetId),
+    getShortcutStatus: () => ipcRenderer.invoke('quickSearch:getShortcutStatus')
   },
   updater: {
     getState: () => ipcRenderer.invoke('updater:getState'),
@@ -124,8 +126,26 @@ const api: XiyunApi = {
       const listener = (_e: Electron.IpcRendererEvent, assetId: number) => cb(assetId)
       ipcRenderer.on('event:focus-asset', listener)
       return () => ipcRenderer.removeListener('event:focus-asset', listener)
+    },
+    onDragOutEnded: (cb) => {
+      const listener = () => cb()
+      ipcRenderer.on('event:drag-out-ended', listener)
+      return () => ipcRenderer.removeListener('event:drag-out-ended', listener)
+    },
+    onQuickSearchOpened: (cb) => {
+      const listener = () => cb()
+      ipcRenderer.on('event:quicksearch-opened', listener)
+      return () => ipcRenderer.removeListener('event:quicksearch-opened', listener)
     }
   }
 }
 
-contextBridge.exposeInMainWorld('api', api)
+const isTrustedRendererOrigin =
+  typeof window !== 'undefined' &&
+  (window.location.protocol === 'file:' ||
+    window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1')
+
+if (isTrustedRendererOrigin) {
+  contextBridge.exposeInMainWorld('api', api)
+}

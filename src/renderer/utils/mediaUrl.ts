@@ -14,7 +14,17 @@ export function getModelFileMediaUrl(assetId: number, fileName: string): string 
 
 export function getThumbMediaUrl(thumbPath: string | null | undefined): string | null {
   if (!thumbPath) return null
-  return `xiyun-media://thumb/${encodeURIComponent(thumbPath)}`
+  const qIdx = thumbPath.indexOf('?')
+  const rawRel = qIdx >= 0 ? thumbPath.slice(0, qIdx) : thumbPath
+  const query = qIdx >= 0 ? thumbPath.slice(qIdx + 1) : ''
+  if (!rawRel) return null
+  const encodedPath = rawRel
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter(Boolean)
+    .map((seg) => encodeURIComponent(seg))
+    .join('/')
+  return query ? `xiyun-media://thumb/${encodedPath}?${query}` : `xiyun-media://thumb/${encodedPath}`
 }
 
 export interface FlatGroupEntry {

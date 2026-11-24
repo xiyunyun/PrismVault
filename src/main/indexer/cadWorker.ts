@@ -12,6 +12,7 @@ import {
   type LibreDwgEx
 } from '@mlightcad/libredwg-web'
 import type { CadBatch, CadLayerInfo, CadPreviewData, CadTextItem } from '@shared/types'
+import { decodeTextBuffer } from '@shared/mediaTypes'
 import { decodeDwgThumbBytesToPng, extractPreviewFromDwgBuffer } from './dwgHeaderPreview'
 
 const require = createRequire(import.meta.url)
@@ -860,13 +861,17 @@ function flattenDxfFallback(text: string): {
         const wx = applyMatX(m, pos.x, pos.y)
         const wy = applyMatY(m, pos.x, pos.y)
         if (isFiniteCoord(wx, wy)) {
+          const matScale = Math.hypot(m[0], m[1]) || 1
+          const matRot = Math.atan2(m[1], m[0])
+          const baseH = Math.max(0.1, Number(ent.textHeight ?? ent.height ?? 2.5))
+          const localRot = ((Number(ent.rotation ?? 0)) * Math.PI) / 180
           col.texts.push({
             layerIndex: layerIdx,
             color,
             x: wx,
             y: wy,
-            height: Math.max(0.1, Number(ent.textHeight ?? ent.height ?? 2.5)),
-            rotation: ((Number(ent.rotation ?? 0)) * Math.PI) / 180,
+            height: Math.max(0.1, baseH * matScale),
+            rotation: localRot + matRot,
             text: txt
           })
         }
@@ -1087,9 +1092,23 @@ async function handleParseRequest(filePath: string): Promise<CadPreviewData> {
       embeddedPreviewPng = await extractPreviewFromDwgBuffer(rawBuf).catch(() => null)
     }
 
+    // Auto-transcode legacy Chinese GBK/GB18030 ASCII DXF files to UTF-8 so both LibreDWG and dxf-parser render Chinese text cleanly
+    let dxfDecodedText: string | null = null
+    let inputBufForLibreDwg: Buffer = rawBuf
+    if (isDxf) {
+      const isBinaryDxf = rawBuf.length >= 22 && rawBuf.subarray(0, 22).toString('ascii').startsWith('AutoCAD Binary DXF')
+      if (!isBinaryDxf) {
+        dxfDecodedText = decodeTextBuffer(rawBuf, false)
+        inputBufForLibreDwg = Buffer.from(dxfDecodedText, 'utf8')
+      }
+    }
+
     try {
       const libredwg = await getLibreDwg()
-      const arrayBuf = rawBuf.buffer.slice(rawBuf.byteOffset, rawBuf.byteOffset + rawBuf.byteLength)
+      const arrayBuf = inputBufForLibreDwg.buffer.slice(
+        inputBufForLibreDwg.byteOffset,
+        inputBufForLibreDwg.byteOffset + inputBufForLibreDwg.byteLength
+      ) as ArrayBuffer
       const ptr = libredwg.dwg_read_data(arrayBuf, isDxf ? Dwg_File_Type.DXF : Dwg_File_Type.DWG)
       if (ptr) {
         try {
@@ -1139,7 +1158,7 @@ async function handleParseRequest(filePath: string): Promise<CadPreviewData> {
 
     if (isDxf && (!col || (col.totalSegments === 0 && col.texts.length === 0))) {
       try {
-        const fb = flattenDxfFallback(rawBuf.toString('utf8'))
+        const fb = flattenDxfFallback(dxfDecodedText ?? decodeTextBuffer(rawBuf, false))
         col = fb.collector
         entityCount = fb.entityCount
         blockCount = fb.blockCount

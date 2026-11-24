@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Copy, ExternalLink, File, Heart, Search, X } from 'lucide-react'
+import { applyTypographyToDocument } from '../utils/fonts'
 import { getThumbMediaUrl } from '../utils/mediaUrl'
 import { formatFileSize } from '@shared/mediaTypes'
 import type { Asset } from '@shared/types'
@@ -8,29 +9,40 @@ export const QuickSearchApp: React.FC = () => {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<Asset[]>([])
   const [activeIdx, setActiveIdx] = useState(0)
+  const [refreshTick, setRefreshTick] = useState(0)
   const [toast, setToast] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    // Sync theme and make transparent window background clean
+    // Sync theme & typography and keep transparent window background clean
     document.documentElement.style.background = 'transparent'
     document.body.style.background = 'transparent'
-    window.api.settings
-      .getAll()
-      .then((s) => {
-        document.documentElement.setAttribute('data-theme', s.theme)
-      })
-      .catch(() => undefined)
 
-    const onFocus = () => {
-      requestAnimationFrame(() => {
-        inputRef.current?.focus()
-        inputRef.current?.select()
-      })
+    const syncAppearanceAndFocus = (selectInput: boolean) => {
+      window.api.settings
+        .getAll()
+        .then((s) => {
+          document.documentElement.setAttribute('data-theme', s.theme)
+          applyTypographyToDocument(s.fontFamily, s.fontSize)
+        })
+        .catch(() => undefined)
+      setRefreshTick((t) => t + 1)
+      if (selectInput) {
+        requestAnimationFrame(() => {
+          inputRef.current?.focus()
+          inputRef.current?.select()
+        })
+      }
     }
+
+    const onFocus = () => syncAppearanceAndFocus(true)
+    const unsubOpened = window.api.events.onQuickSearchOpened(() => syncAppearanceAndFocus(true))
     window.addEventListener('focus', onFocus)
-    onFocus()
-    return () => window.removeEventListener('focus', onFocus)
+    syncAppearanceAndFocus(true)
+    return () => {
+      unsubOpened()
+      window.removeEventListener('focus', onFocus)
+    }
   }, [])
 
   useEffect(() => {
@@ -48,13 +60,13 @@ export const QuickSearchApp: React.FC = () => {
           offset: 0
         })
         setResults(res.items)
-        setActiveIdx(0)
+        setActiveIdx((prev) => Math.min(prev, Math.max(0, res.items.length - 1)))
       } catch {
         setResults([])
       }
-    }, 90)
+    }, 80)
     return () => clearTimeout(timer)
-  }, [query])
+  }, [query, refreshTick])
 
   const flashToast = (msg: string) => {
     setToast(msg)

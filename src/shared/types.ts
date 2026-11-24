@@ -21,6 +21,7 @@ export interface AssetExtraMeta {
   artist?: string
   album?: string
   title?: string
+  noEmbeddedCover?: boolean
   lineCount?: number
   charCount?: number
   format?: string
@@ -445,6 +446,7 @@ export interface XiyunApi {
     updateNote: (id: number, note: string) => Promise<void>
     batchAppendNote: (ids: number[], text: string) => Promise<void>
     setStatus: (ids: number[], status: AssetStatus) => Promise<void>
+    restoreAllHidden: () => Promise<number>
     setFavorite: (ids: number[], isFavorite: boolean) => Promise<void>
     moveToTrash: (ids: number[]) => Promise<{ trashed: number; failed: string[] }>
     readTextContent: (id: number) => Promise<TextContentResult>
@@ -498,6 +500,7 @@ export interface XiyunApi {
   quickSearch: {
     hide: () => Promise<void>
     openAssetInMain: (assetId: number) => Promise<void>
+    getShortcutStatus: () => Promise<{ registered: boolean; shortcut: string; error: string | null }>
   }
   updater: {
     getState: () => Promise<UpdateState>
@@ -540,5 +543,7 @@ export interface XiyunApi {
     onEagleProgress: (cb: (progress: EagleMigrationProgress) => void) => () => void
     onUpdateState: (cb: (state: UpdateState) => void) => () => void
     onFocusAsset: (cb: (assetId: number) => void) => () => void
+    onDragOutEnded: (cb: () => void) => () => void
+    onQuickSearchOpened: (cb: () => void) => () => void
   }
 }

@@ -61,6 +61,14 @@ const naturalCollator = new Intl.Collator('zh-CN', {
   sensitivity: 'base'
 })
 
+function chunkArray<T>(arr: readonly T[], chunkSize = 900): T[][] {
+  const chunks: T[][] = []
+  for (let i = 0; i < arr.length; i += chunkSize) {
+    chunks.push(arr.slice(i, i + chunkSize))
+  }
+  return chunks
+}
+
 // ===================== Settings =====================
 
 export function getAllSettings(): AppSettings {
@@ -165,7 +173,8 @@ export function getSourceRootById(id: number): SourceRoot | null {
 
 export function createSourceRoot(dirPath: string, alias: string): SourceRoot {
   const db = getDb()
-  const existing = db.prepare('SELECT id FROM source_roots WHERE path = ?').get(dirPath) as
+  const resolved = path.resolve(dirPath)
+  const existing = db.prepare('SELECT id FROM source_roots WHERE lower(path) = lower(?)').get(resolved) as
     | { id: number }
     | undefined
   if (existing) {
@@ -177,8 +186,35 @@ export function createSourceRoot(dirPath: string, alias: string): SourceRoot {
       `INSERT INTO source_roots (path, alias, watch_enabled, ignore_patterns, created_at)
        VALUES (?, ?, 0, ?, ?)`
     )
-    .run(dirPath, alias, JSON.stringify(DEFAULT_IGNORE_PATTERNS), now)
+    .run(resolved, alias, JSON.stringify(DEFAULT_IGNORE_PATTERNS), now)
   return getSourceRootById(Number(result.lastInsertRowid))!
+}
+
+export function findOverlappingSourceRoot(
+  dirPath: string,
+  ignoreDirPath?: string
+): { kind: 'exact' | 'inside_existing' | 'contains_existing'; existing: SourceRoot } | null {
+  const candidate = path.resolve(dirPath).toLowerCase()
+  const candPrefix = candidate.endsWith(path.sep) ? candidate : candidate + path.sep
+  const ignoreNorm = ignoreDirPath ? path.resolve(ignoreDirPath).toLowerCase() : null
+
+  for (const sr of listSourceRoots()) {
+    const srNorm = path.resolve(sr.path).toLowerCase()
+    if (candidate === srNorm) {
+      return { kind: 'exact', existing: sr }
+    }
+    if (ignoreNorm && srNorm === ignoreNorm) {
+      continue
+    }
+    const srPrefix = srNorm.endsWith(path.sep) ? srNorm : srNorm + path.sep
+    if (candidate.startsWith(srPrefix)) {
+      return { kind: 'inside_existing', existing: sr }
+    }
+    if (srNorm.startsWith(candPrefix)) {
+      return { kind: 'contains_existing', existing: sr }
+    }
+  }
+  return null
 }
 
 export function updateSourceRoot(
@@ -784,10 +820,23 @@ export function queryAssets(filter: AssetQueryFilter): AssetQueryResult {
   }
 
   if (filter.groupId != null) {
-    const groupIds = filter.includeSubgroups !== false ? getDescendantGroupIds(filter.groupId) : [filter.groupId]
-    const placeholders = groupIds.map(() => '?').join(',')
-    where.push(`EXISTS (SELECT 1 FROM asset_groups ag WHERE ag.asset_id = a.id AND ag.group_id IN (${placeholders}))`)
-    params.push(...groupIds)
+    if (filter.includeSubgroups !== false) {
+      where.push(
+        `EXISTS (
+           WITH RECURSIVE sub_groups(id) AS (
+             SELECT ?
+             UNION ALL
+             SELECT g.id FROM groups g JOIN sub_groups sg ON g.parent_id = sg.id
+           )
+           SELECT 1 FROM asset_groups ag
+           WHERE ag.asset_id = a.id AND ag.group_id IN (SELECT id FROM sub_groups)
+         )`
+      )
+      params.push(filter.groupId)
+    } else {
+      where.push(`EXISTS (SELECT 1 FROM asset_groups ag WHERE ag.asset_id = a.id AND ag.group_id = ?)`)
+      params.push(filter.groupId)
+    }
   }
 
   if (filter.search && filter.search.trim().length > 0) {
@@ -798,8 +847,10 @@ export function queryAssets(filter: AssetQueryFilter): AssetQueryResult {
     for (const token of tokens) {
       const escaped = token.replace(/[\\%_]/g, '\\$&')
       const pattern = `%${escaped}%`
-      where.push(`(a.file_name LIKE ? ESCAPE '\\' OR a.note LIKE ? ESCAPE '\\' OR a.file_path LIKE ? ESCAPE '\\')`)
-      params.push(pattern, pattern, pattern)
+      where.push(
+        `(a.file_name LIKE ? ESCAPE '\\' OR a.note LIKE ? ESCAPE '\\' OR a.file_path LIKE ? ESCAPE '\\' OR COALESCE(a.text_snippet, '') LIKE ? ESCAPE '\\')`
+      )
+      params.push(pattern, pattern, pattern, pattern)
     }
   }
 
@@ -836,37 +887,7 @@ export function queryAssets(filter: AssetQueryFilter): AssetQueryResult {
     total = rows.length
   }
 
-  // Batch-load asset->group edges once instead of running an N+1 correlated subquery per asset row
-  let groupsByAsset: Map<number, number[]> | null = null
-  if (rows.length > 0) {
-    const edgeRows = db.prepare('SELECT asset_id, group_id FROM asset_groups').all() as Array<{
-      asset_id: number
-      group_id: number
-    }>
-    if (edgeRows.length > 0) {
-      groupsByAsset = new Map<number, number[]>()
-      for (const e of edgeRows) {
-        const aid = Number(e.asset_id)
-        const gid = Number(e.group_id)
-        let list = groupsByAsset.get(aid)
-        if (!list) {
-          list = [gid]
-          groupsByAsset.set(aid, list)
-        } else {
-          list.push(gid)
-        }
-      }
-    }
-  }
-
-  let items = rows.map((row) => {
-    const asset = mapAssetRow(row)
-    if (groupsByAsset) {
-      const gids = groupsByAsset.get(asset.id)
-      if (gids) asset.groupIds = gids
-    }
-    return asset
-  })
+  let items = rows.map((row) => mapAssetRow(row))
 
   // Apply perceptual color similarity filtering & ranking when colorHex is active
   if (targetColor) {
@@ -894,6 +915,37 @@ export function queryAssets(filter: AssetQueryFilter): AssetQueryResult {
 
   if (!useSqlPagination && limit > 0) {
     items = items.slice(offset, offset + limit)
+  }
+
+  // Batch-load asset->group edges ONLY for the final returned page of items (chunked by 900)
+  if (items.length > 0) {
+    const groupsByAsset = new Map<number, number[]>()
+    for (const idChunk of chunkArray(
+      items.map((a) => a.id),
+      900
+    )) {
+      const placeholders = idChunk.map(() => '?').join(',')
+      const edgeRows = db
+        .prepare(`SELECT asset_id, group_id FROM asset_groups WHERE asset_id IN (${placeholders})`)
+        .all(...idChunk) as Array<{ asset_id: number; group_id: number }>
+      for (const e of edgeRows) {
+        const aid = Number(e.asset_id)
+        const gid = Number(e.group_id)
+        let list = groupsByAsset.get(aid)
+        if (!list) {
+          list = [gid]
+          groupsByAsset.set(aid, list)
+        } else {
+          list.push(gid)
+        }
+      }
+    }
+    if (groupsByAsset.size > 0) {
+      for (const asset of items) {
+        const gids = groupsByAsset.get(asset.id)
+        if (gids) asset.groupIds = gids
+      }
+    }
   }
 
   const hasMore = limit > 0 ? offset + items.length < total : false
@@ -1083,22 +1135,29 @@ export function updateAssetDominantColors(id: number, colors: string[]): void {
 
 export function getAssetsMissingColors(
   limit = 400
-): Array<{ id: number; thumbPath: string | null; filePath: string; mediaType: MediaType }> {
+): Array<{ id: number; thumbPath: string | null; filePath: string; ext: string; mediaType: MediaType }> {
   const db = getDb()
   const rows = db
     .prepare(
-      `SELECT id, thumb_path, file_path, media_type
+      `SELECT id, thumb_path, file_path, ext, media_type
        FROM assets
        WHERE status = 'active'
          AND media_type IN ('image', 'video')
          AND (dominant_colors IS NULL OR dominant_colors = '')
        LIMIT ?`
     )
-    .all(limit) as Array<{ id: number; thumb_path: string | null; file_path: string; media_type: MediaType }>
+    .all(limit) as Array<{
+    id: number
+    thumb_path: string | null
+    file_path: string
+    ext: string
+    media_type: MediaType
+  }>
   return rows.map((r) => ({
     id: Number(r.id),
     thumbPath: r.thumb_path,
     filePath: r.file_path,
+    ext: r.ext,
     mediaType: r.media_type
   }))
 }
@@ -1232,14 +1291,31 @@ export function deleteAssetsByIds(ids: number[]): void {
   }
 }
 
+export function restoreAllHiddenAssets(): number {
+  const db = getDb()
+  const res = db.prepare(`UPDATE assets SET status = 'active' WHERE status = 'hidden'`).run()
+  return Number(res.changes)
+}
+
 export function removeMissingAssets(ids?: number[]): number {
   const db = getDb()
   if (ids && ids.length > 0) {
-    const placeholders = ids.map(() => '?').join(',')
-    const res = db
-      .prepare(`DELETE FROM assets WHERE status = 'missing' AND id IN (${placeholders})`)
-      .run(...ids)
-    return Number(res.changes)
+    let removed = 0
+    db.exec('BEGIN')
+    try {
+      for (const idChunk of chunkArray(ids, 900)) {
+        const placeholders = idChunk.map(() => '?').join(',')
+        const res = db
+          .prepare(`DELETE FROM assets WHERE status = 'missing' AND id IN (${placeholders})`)
+          .run(...idChunk)
+        removed += Number(res.changes)
+      }
+      db.exec('COMMIT')
+    } catch (err) {
+      db.exec('ROLLBACK')
+      throw err
+    }
+    return removed
   }
   const res = db.prepare(`DELETE FROM assets WHERE status = 'missing'`).run()
   return Number(res.changes)
@@ -1261,13 +1337,35 @@ export function updateAssetThumbAndDims(
   }
 }
 
+export function getMissingAssetIds(ids?: number[]): number[] {
+  const db = getDb()
+  if (ids && ids.length > 0) {
+    const result: number[] = []
+    for (let i = 0; i < ids.length; i += 900) {
+      const slice = ids.slice(i, i + 900)
+      const placeholders = slice.map(() => '?').join(',')
+      const rows = db
+        .prepare(`SELECT id FROM assets WHERE status = 'missing' AND id IN (${placeholders})`)
+        .all(...slice) as Array<{ id: number }>
+      for (const r of rows) result.push(Number(r.id))
+    }
+    return result
+  }
+  const rows = db.prepare(`SELECT id FROM assets WHERE status = 'missing'`).all() as Array<{ id: number }>
+  return rows.map((r) => Number(r.id))
+}
+
 export function getAssetsMissingThumbs(): Array<{ id: number; filePath: string; ext: string; mediaType: MediaType }> {
   const db = getDb()
   const rows = db
     .prepare(
       `SELECT id, file_path, ext, media_type FROM assets
        WHERE status = 'active'
-       AND media_type IN ('image', 'video', 'audio', 'model')
+       AND (
+         media_type IN ('image', 'video')
+         OR (media_type = 'audio' AND COALESCE(extra_meta, '') NOT LIKE '%"noEmbeddedCover":true%')
+         OR (media_type = 'model' AND LOWER(ext) IN ('.dwg', '.dxf'))
+       )
        AND (thumb_path IS NULL OR thumb_path = '')`
     )
     .all() as Array<{ id: number; file_path: string; ext: string; media_type: MediaType }>

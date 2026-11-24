@@ -286,10 +286,15 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({ width }) => {
   }
 
   const handleAddSource = async () => {
-    const added = await window.api.sources.pickAndAdd()
-    if (added) {
-      showToast(`已挂载目录「${added.alias}」，正在后台索引...`, 'success')
-      await refreshAll()
+    try {
+      const added = await window.api.sources.pickAndAdd()
+      if (added) {
+        showToast(`已挂载目录「${added.alias}」，正在后台索引...`, 'success')
+        await refreshAll()
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': Error:\s*/, '') : String(err)
+      showToast(msg || '添加索引目录失败', 'error')
     }
   }
 

@@ -109,8 +109,9 @@ export const SettingsModal: React.FC = () => {
   const [mirrorDraft, setMirrorDraft] = useState('')
   const [movingCache, setMovingCache] = useState(false)
   const [movingClipboard, setMovingClipboard] = useState(false)
+  const [shortcutError, setShortcutError] = useState<string | null>(null)
 
-  const displayVersion = appInfo?.version || updateState?.currentVersion || '0.2.0'
+  const displayVersion = appInfo?.version || updateState?.currentVersion || '0.6.0'
   const installTypeLabel =
     (appInfo?.installType || updateState?.installType) === 'installer'
       ? '安装版'
@@ -151,14 +152,16 @@ export const SettingsModal: React.FC = () => {
   }, [settingsOpen, settingsInitialTab])
 
   const loadSystemStats = async () => {
-    const [cs, cbStats, ff] = await Promise.all([
+    const [cs, cbStats, ff, qsStatus] = await Promise.all([
       window.api.settings.getCacheStats(),
       window.api.clipboard.getStats(),
-      window.api.system.checkFfmpeg()
+      window.api.system.checkFfmpeg(),
+      window.api.quickSearch.getShortcutStatus()
     ])
     setCacheStats(cs)
     setClipboardStats(cbStats)
     setFfmpegStatus(ff)
+    setShortcutError(qsStatus.error)
   }
 
   const handleStartEagleWizard = async () => {
@@ -380,10 +383,18 @@ export const SettingsModal: React.FC = () => {
                     <button
                       type="button"
                       onClick={async () => {
-                        const added = await window.api.sources.pickAndAdd()
-                        if (added) {
-                          showToast(`已挂载「${added.alias}」`, 'success')
-                          await refreshAll()
+                        try {
+                          const added = await window.api.sources.pickAndAdd()
+                          if (added) {
+                            showToast(`已挂载「${added.alias}」`, 'success')
+                            await refreshAll()
+                          }
+                        } catch (err) {
+                          const msg =
+                            err instanceof Error
+                              ? err.message.replace(/^Error invoking remote method '[^']+': Error:\s*/, '')
+                              : String(err)
+                          showToast(msg || '添加索引目录失败', 'error')
                         }
                       }}
                       className="h-9 px-3.5 rounded-md text-xs font-medium text-white flex items-center gap-1.5 cursor-pointer"
@@ -1152,13 +1163,20 @@ export const SettingsModal: React.FC = () => {
                         type="checkbox"
                         checked={Boolean(settings.quickSearchEnabled)}
                         onChange={async (e) => {
-                          await updateSettings({ quickSearchEnabled: e.target.checked })
-                          showToast(
-                            e.target.checked
-                              ? `已开启全局极速搜图浮窗（快捷键：${settings.quickSearchShortcut || 'Alt+Space'}）`
-                              : '已关闭全局极速搜图快捷键',
-                            'success'
-                          )
+                          const enabled = e.target.checked
+                          await updateSettings({ quickSearchEnabled: enabled })
+                          const qsStatus = await window.api.quickSearch.getShortcutStatus()
+                          setShortcutError(qsStatus.error)
+                          if (enabled && qsStatus.error) {
+                            showToast(qsStatus.error, 'error')
+                          } else {
+                            showToast(
+                              enabled
+                                ? `已开启全局极速搜图浮窗（快捷键：${settings.quickSearchShortcut || 'Alt+Space'}）`
+                                : '已关闭全局极速搜图快捷键',
+                              'success'
+                            )
+                          }
                         }}
                         className="w-4 h-4 mt-0.5 accent-[var(--accent-solid)] cursor-pointer shrink-0"
                       />
@@ -1166,32 +1184,53 @@ export const SettingsModal: React.FC = () => {
 
                     {settings.quickSearchEnabled && (
                       <div
-                        className="pt-2 border-t flex flex-wrap items-center justify-between gap-2 text-xs"
+                        className="pt-2 border-t space-y-2 text-xs"
                         style={{ borderColor: 'var(--border-subtle)' }}
                       >
-                        <span style={{ color: 'var(--text-secondary)' }}>呼出快捷键组合：</span>
-                        <div className="flex flex-wrap gap-1.5">
-                          {['Alt+Space', 'Ctrl+Shift+Space', 'Alt+Q', 'Ctrl+Alt+P'].map((accel) => {
-                            const active = (settings.quickSearchShortcut || 'Alt+Space') === accel
-                            return (
-                              <button
-                                key={accel}
-                                type="button"
-                                onClick={async () => {
-                                  await updateSettings({ quickSearchShortcut: accel })
-                                  showToast(`已将极速搜图快捷键设为 ${accel}`, 'success')
-                                }}
-                                className="px-2.5 h-7 rounded-md border font-mono text-xs cursor-pointer transition-colors"
-                                style={{
-                                  backgroundColor: active ? 'var(--accent-solid)' : 'var(--bg-elevated)',
-                                  borderColor: active ? 'var(--accent-solid)' : 'var(--border-subtle)',
-                                  color: active ? '#fff' : 'var(--text-secondary)'
-                                }}
-                              >
-                                {accel}
-                              </button>
-                            )
-                          })}
+                        {shortcutError && (
+                          <div
+                            className="px-2.5 py-1.5 rounded-md border flex items-center gap-1.5 text-[0.72rem]"
+                            style={{
+                              backgroundColor: 'rgba(239, 68, 68, 0.10)',
+                              borderColor: 'rgba(239, 68, 68, 0.35)',
+                              color: 'var(--danger)'
+                            }}
+                          >
+                            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                            <span>{shortcutError}</span>
+                          </div>
+                        )}
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span style={{ color: 'var(--text-secondary)' }}>呼出快捷键组合：</span>
+                          <div className="flex flex-wrap gap-1.5">
+                            {['Alt+Space', 'Ctrl+Shift+Space', 'Alt+Q', 'Ctrl+Alt+P'].map((accel) => {
+                              const active = (settings.quickSearchShortcut || 'Alt+Space') === accel
+                              return (
+                                <button
+                                  key={accel}
+                                  type="button"
+                                  onClick={async () => {
+                                    await updateSettings({ quickSearchShortcut: accel })
+                                    const qsStatus = await window.api.quickSearch.getShortcutStatus()
+                                    setShortcutError(qsStatus.error)
+                                    if (qsStatus.error) {
+                                      showToast(qsStatus.error, 'error')
+                                    } else {
+                                      showToast(`已将极速搜图快捷键设为 ${accel}`, 'success')
+                                    }
+                                  }}
+                                  className="px-2.5 h-7 rounded-md border font-mono text-xs cursor-pointer transition-colors"
+                                  style={{
+                                    backgroundColor: active ? 'var(--accent-solid)' : 'var(--bg-elevated)',
+                                    borderColor: active ? 'var(--accent-solid)' : 'var(--border-subtle)',
+                                    color: active ? '#fff' : 'var(--text-secondary)'
+                                  }}
+                                >
+                                  {accel}
+                                </button>
+                              )
+                            })}
+                          </div>
                         </div>
                       </div>
                     )}
@@ -2264,6 +2303,10 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.`}</pre>
+                  <p className="text-[11px] leading-relaxed pt-0.5" style={{ color: 'var(--text-muted)' }}>
+                    协议边界说明：PrismVault 主体代码基于 MIT License 开源；其中用于离线解析 DWG/DXF 图纸的独立工作线程组件{' '}
+                    <code className="font-mono">@mlightcad/libredwg-web</code>（基于 GNU LibreDWG）遵循 GPL-3.0 协议，视频流探测与抽帧通过调用系统外部 FFmpeg 执行。
+                  </p>
                 </div>
 
                 {/* Open Source Acknowledgments */}

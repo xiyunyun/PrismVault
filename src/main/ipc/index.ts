@@ -1,12 +1,13 @@
 import fs from 'fs'
 import fsp from 'fs/promises'
 import path from 'path'
-import { execFile } from 'child_process'
+import { spawn } from 'child_process'
 import { BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron'
 import sharp from 'sharp'
 import {
   ensureThumbSubdirs,
   getCadThumbCacheDir,
+  getClipboardDir,
   getDb,
   getDbPath,
   getDefaultThumbCacheDir,
@@ -25,12 +26,14 @@ import {
   deleteGroup,
   deleteSourceRoot,
   findDuplicateAssetGroups,
+  findOverlappingSourceRoot,
   getAllSettings,
   getAssetById,
   getAssetsMissingThumbs,
   getAssetThumbRefsByRootId,
   getLibraryStats,
   getMissing3DModelThumbs,
+  getMissingAssetIds,
   listGroupTree,
   listSourceRoots,
   mergeAssetExtraMeta,
@@ -38,6 +41,7 @@ import {
   queryAssets,
   removeMissingAssets,
   reorderGroup,
+  restoreAllHiddenAssets,
   setAssetsFavorite,
   setAssetsStatus,
   unassignAssetsFromGroups,
@@ -49,12 +53,14 @@ import {
   updateSourceRoot
 } from '../db/repositories'
 import { indexScanner } from '../indexer/scanner'
+import { computeFullFileSha256, FULL_HASH_THRESHOLD_BYTES } from '../indexer/fingerprint'
 import { thumbnailQueue } from '../indexer/thumbnailer'
 import { extractDominantColors } from '../indexer/colorExtractor'
 import { watcherManager } from '../indexer/watcher'
 import { resolveFfmpeg } from '../indexer/ffmpeg'
 import { parseCadForPreview } from '../indexer/cad'
-import { isCadExt } from '@shared/mediaTypes'
+import { renderPsdToPngBuffer } from '../indexer/psd'
+import { decodeTextBuffer, isCadExt, isPsdExt, stripThumbVersion } from '@shared/mediaTypes'
 import {
   commitClipboardImport,
   getClipboardStats,
@@ -64,6 +70,7 @@ import {
 } from '../indexer/clipboardImport'
 import { inspectEagleLibrary, migrateFromEagle } from '../indexer/eagleMigrator'
 import {
+  getQuickSearchShortcutStatus,
   hideQuickSearchWindow,
   openAssetInMainWindow,
   resolveEffectiveBackdropStyle,
@@ -146,6 +153,85 @@ function makeFriendlyAlias(dirPath: string): string {
   return root ? `${base} (${root})` : base
 }
 
+function assertNonOverlappingUserRoot(dirPath: string): void {
+  const overlap = findOverlappingSourceRoot(dirPath, getClipboardDir())
+  if (!overlap || overlap.kind === 'exact') return
+  if (overlap.kind === 'inside_existing') {
+    throw new Error(`该目录已包含在现有索引源「${overlap.existing.alias}」内，无需重复挂载`)
+  }
+  throw new Error(
+    `该目录包含已挂载的子目录「${overlap.existing.alias}」，请先移除该子目录源再挂载上级目录`
+  )
+}
+
+async function cleanupThumbsForRefs(refs: Array<{ id: number; thumbPath: string | null }>): Promise<number> {
+  if (refs.length === 0) return 0
+  const cacheRoot = path.resolve(getThumbCacheDir())
+  const cacheRootLowerPrefix = cacheRoot.toLowerCase() + path.sep
+  const idSet = new Set<number>()
+  const candidateRelPaths = new Set<string>()
+
+  for (const ref of refs) {
+    idSet.add(ref.id)
+    const cleanRef = stripThumbVersion(ref.thumbPath)
+    if (cleanRef) {
+      candidateRelPaths.add(cleanRef.replace(/\\/g, '/').replace(/^\/+/, ''))
+    }
+    candidateRelPaths.add(`${ref.id}.webp`)
+    candidateRelPaths.add(`models/${ref.id}.webp`)
+    candidateRelPaths.add(`cad/${ref.id}.webp`)
+  }
+
+  let removedCount = 0
+  for (const rel of candidateRelPaths) {
+    const candidate = path.resolve(cacheRoot, rel)
+    if (!candidate.toLowerCase().startsWith(cacheRootLowerPrefix)) continue
+    try {
+      await fsp.unlink(candidate)
+      removedCount++
+    } catch {
+      // ignore missing
+    }
+  }
+
+  // Remove any high-res transcoded PSD/TIFF preview caches (preview_<assetId>_<mtime>.webp)
+  try {
+    const rootFiles = await fsp.readdir(cacheRoot)
+    for (const f of rootFiles) {
+      const m = /^preview_(\d+)_\d+\.webp$/i.exec(f)
+      if (m && idSet.has(Number(m[1]))) {
+        try {
+          await fsp.unlink(path.join(cacheRoot, f))
+          removedCount++
+        } catch {
+          // ignore
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return removedCount
+}
+
+async function cleanupThumbsForAssetIds(ids: number[]): Promise<number> {
+  if (ids.length === 0) return 0
+  const db = getDb()
+  const refs: Array<{ id: number; thumbPath: string | null }> = []
+  for (let i = 0; i < ids.length; i += 900) {
+    const slice = ids.slice(i, i + 900)
+    const placeholders = slice.map(() => '?').join(',')
+    const rows = db
+      .prepare(`SELECT id, thumb_path FROM assets WHERE id IN (${placeholders})`)
+      .all(...slice) as Array<{ id: number; thumb_path: string | null }>
+    for (const r of rows) {
+      refs.push({ id: Number(r.id), thumbPath: r.thumb_path })
+    }
+  }
+  return cleanupThumbsForRefs(refs)
+}
+
 export function registerIpcHandlers(): void {
   // Wire backend events to renderer
   indexScanner.onProgress((progress) => broadcast('event:scan-progress', progress))
@@ -165,6 +251,7 @@ export function registerIpcHandlers(): void {
     })
     if (result.canceled || result.filePaths.length === 0) return null
     const dirPath = path.resolve(result.filePaths[0])
+    assertNonOverlappingUserRoot(dirPath)
     const root = createSourceRoot(dirPath, makeFriendlyAlias(dirPath))
     // Kick off scan asynchronously so UI updates immediately
     indexScanner.scanSource(root.id).catch(() => undefined)
@@ -174,6 +261,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('sources:addPath', (_e, dirPath: string, alias?: string) => {
     const resolved = path.resolve(dirPath)
+    assertNonOverlappingUserRoot(resolved)
     const root = createSourceRoot(resolved, alias?.trim() || makeFriendlyAlias(resolved))
     indexScanner.scanSource(root.id).catch(() => undefined)
     broadcast('event:assets-changed')
@@ -187,43 +275,7 @@ export function registerIpcHandlers(): void {
 
     deleteSourceRoot(id)
 
-    let removedThumbs = 0
-    if (shouldDeleteThumbs && thumbRefs.length > 0) {
-      const cacheRoot = path.resolve(getThumbCacheDir())
-      const idSet = new Set<number>(thumbRefs.map((r) => r.id))
-
-      // 1. Delete direct thumbnails (including models/<id>.webp and cad/<id>.webp)
-      for (const ref of thumbRefs) {
-        if (!ref.thumbPath) continue
-        const normalized = ref.thumbPath.replace(/\\/g, '/').replace(/^\/+/, '')
-        const candidate = path.resolve(cacheRoot, normalized)
-        if (!candidate.toLowerCase().startsWith(cacheRoot.toLowerCase() + path.sep)) continue
-        try {
-          await fsp.unlink(candidate)
-          removedThumbs++
-        } catch {
-          // ignore already-removed or missing thumb
-        }
-      }
-
-      // 2. Also remove any high-res transcoded PSD/TIFF preview caches (preview_<assetId>_<mtime>.webp)
-      try {
-        const rootFiles = await fsp.readdir(cacheRoot)
-        for (const f of rootFiles) {
-          const m = /^preview_(\d+)_\d+\.webp$/i.exec(f)
-          if (m && idSet.has(Number(m[1]))) {
-            try {
-              await fsp.unlink(path.join(cacheRoot, f))
-              removedThumbs++
-            } catch {
-              // ignore
-            }
-          }
-        }
-      } catch {
-        // ignore
-      }
-    }
+    const removedThumbs = shouldDeleteThumbs && thumbRefs.length > 0 ? await cleanupThumbsForRefs(thumbRefs) : 0
 
     broadcast('event:assets-changed')
     return { removedThumbs }
@@ -269,7 +321,19 @@ export function registerIpcHandlers(): void {
     broadcast('event:assets-changed')
   })
 
-  ipcMain.handle('assets:removeMissing', (_e, ids?: number[]) => {
+  ipcMain.handle('assets:restoreAllHidden', () => {
+    const count = restoreAllHiddenAssets()
+    if (count > 0) {
+      broadcast('event:assets-changed')
+    }
+    return count
+  })
+
+  ipcMain.handle('assets:removeMissing', async (_e, ids?: number[]) => {
+    const targetIds = getMissingAssetIds(ids)
+    if (targetIds.length > 0) {
+      await cleanupThumbsForAssetIds(targetIds)
+    }
     const removed = removeMissingAssets(ids)
     broadcast('event:assets-changed')
     return removed
@@ -291,6 +355,7 @@ export function registerIpcHandlers(): void {
       }
     }
     if (trashedIds.length > 0) {
+      await cleanupThumbsForAssetIds(trashedIds)
       deleteAssetsByIds(trashedIds)
       broadcast('event:assets-changed')
     }
@@ -304,14 +369,15 @@ export function registerIpcHandlers(): void {
     }
     const stat = await fsp.stat(asset.filePath)
     const totalBytes = stat.size
+    const truncated = totalBytes > MAX_TEXT_READ_BYTES
     const readSize = Math.min(totalBytes, MAX_TEXT_READ_BYTES)
     const handle = await fsp.open(asset.filePath, 'r')
     try {
       const buf = Buffer.alloc(readSize)
       const { bytesRead } = await handle.read(buf, 0, readSize, 0)
       return {
-        content: buf.subarray(0, bytesRead).toString('utf8'),
-        truncated: totalBytes > MAX_TEXT_READ_BYTES,
+        content: decodeTextBuffer(buf.subarray(0, bytesRead), truncated),
+        truncated,
         totalBytes
       }
     } finally {
@@ -378,7 +444,8 @@ export function registerIpcHandlers(): void {
 
       const width = meta.width ?? 480
       const height = meta.height ?? 360
-      updateAssetThumbAndDims(asset.id, relPath, width, height)
+      const versionedThumb = `${relPath}?v=${Date.now()}`
+      updateAssetThumbAndDims(asset.id, versionedThumb, width, height)
       let dominantColors: string[] | undefined
       if (isVideo) {
         dominantColors = await extractDominantColors(outPath, 5)
@@ -387,8 +454,8 @@ export function registerIpcHandlers(): void {
       if (extraMetaPatch && Object.keys(extraMetaPatch).length > 0) {
         mergeAssetExtraMeta(asset.id, extraMetaPatch)
       }
-      broadcast('event:thumb-ready', { assetId: asset.id, thumbPath: relPath, width, height, dominantColors })
-      return relPath
+      broadcast('event:thumb-ready', { assetId: asset.id, thumbPath: versionedThumb, width, height, dominantColors })
+      return versionedThumb
     }
   )
 
@@ -399,7 +466,105 @@ export function registerIpcHandlers(): void {
     broadcast('event:assets-changed')
   })
 
-  ipcMain.handle('assets:findDuplicates', () => findDuplicateAssetGroups())
+  ipcMain.handle('assets:findDuplicates', async () => {
+    const candidates = findDuplicateAssetGroups()
+    if (candidates.length === 0) return []
+
+    type StattedItem = { asset: (typeof candidates)[number]['items'][number]; size: number; mtimeMs: number }
+    const groupsToHash: Array<{ fp: string; items: StattedItem[] }> = []
+    const verifiedGroups: typeof candidates = []
+
+    for (const group of candidates) {
+      const validItems: StattedItem[] = []
+      for (const item of group.items) {
+        try {
+          const st = await fsp.stat(item.filePath)
+          if (st.isFile() && st.size > 0) {
+            validItems.push({ asset: item, size: st.size, mtimeMs: Math.floor(st.mtimeMs) })
+          }
+        } catch {
+          // Skip offline / deleted files
+        }
+      }
+      if (validItems.length < 2) continue
+
+      const needsFullSha = validItems.some(
+        (v) =>
+          v.size > FULL_HASH_THRESHOLD_BYTES ||
+          v.size !== v.asset.fileSize ||
+          Math.abs(v.mtimeMs - v.asset.modifiedAt) > 1000
+      )
+
+      if (!needsFullSha) {
+        // <= 128KB and unchanged since scan: computeFingerprint already hashed 100% of file bytes
+        verifiedGroups.push({
+          fingerprint: group.fingerprint,
+          fileSize: validItems[0].size,
+          count: validItems.length,
+          items: validItems.map((v) => v.asset)
+        })
+      } else {
+        groupsToHash.push({ fp: group.fingerprint, items: validItems })
+      }
+    }
+
+    if (groupsToHash.length > 0) {
+      // Flatten items needing full streaming SHA-256 and compute with bounded 4x concurrency
+      const flatTasks: Array<{ item: StattedItem; sha256: string | null }> = []
+      for (const g of groupsToHash) {
+        for (const it of g.items) {
+          flatTasks.push({ item: it, sha256: null })
+        }
+      }
+
+      let cursor = 0
+      const workers = Array.from({ length: Math.min(4, flatTasks.length) }, async () => {
+        while (true) {
+          const idx = cursor++
+          if (idx >= flatTasks.length) break
+          const entry = flatTasks[idx]
+          entry.sha256 = await computeFullFileSha256(entry.item.asset.filePath)
+        }
+      })
+      await Promise.all(workers)
+
+      const shaByAssetId = new Map<number, string>()
+      for (const t of flatTasks) {
+        if (t.sha256) {
+          shaByAssetId.set(t.item.asset.id, t.sha256)
+        }
+      }
+
+      for (const g of groupsToHash) {
+        const subBuckets = new Map<string, StattedItem[]>()
+        for (const it of g.items) {
+          const sha = shaByAssetId.get(it.asset.id)
+          if (!sha) continue
+          const exactKey = `${it.size}:sha256:${sha}`
+          let bucket = subBuckets.get(exactKey)
+          if (!bucket) {
+            bucket = [it]
+            subBuckets.set(exactKey, bucket)
+          } else {
+            bucket.push(it)
+          }
+        }
+        for (const [exactKey, bucket] of subBuckets.entries()) {
+          if (bucket.length > 1) {
+            verifiedGroups.push({
+              fingerprint: exactKey,
+              fileSize: bucket[0].size,
+              count: bucket.length,
+              items: bucket.map((b) => b.asset)
+            })
+          }
+        }
+      }
+    }
+
+    verifiedGroups.sort((a, b) => (b.items.length - 1) * b.fileSize - (a.items.length - 1) * a.fileSize)
+    return verifiedGroups
+  })
 
   ipcMain.handle(
     'assets:mergeDuplicates',
@@ -474,6 +639,7 @@ export function registerIpcHandlers(): void {
         }
       }
       if (removedIds.length > 0) {
+        await cleanupThumbsForAssetIds(removedIds)
         deleteAssetsByIds(removedIds)
       }
       broadcast('event:assets-changed')
@@ -736,8 +902,22 @@ export function registerIpcHandlers(): void {
       }
 
       if (mode === 'image' && existing.length === 1) {
+        const singlePath = existing[0]
+        const ext = path.extname(singlePath)
+        if (isPsdExt(ext)) {
+          const psdPng = await renderPsdToPngBuffer(singlePath, 2560)
+          if (psdPng) {
+            const img = nativeImage.createFromBuffer(psdPng)
+            if (!img.isEmpty()) {
+              clipboard.writeImage(img)
+              return { ok: true }
+            }
+          }
+          return { ok: false, error: '无法将此 PSD/PSB 文件渲染为剪贴板图像' }
+        }
+
         try {
-          const pngBuf = await sharp(existing[0], { failOn: 'none', pages: 1 }).rotate().png().toBuffer()
+          const pngBuf = await sharp(singlePath, { failOn: 'none', pages: 1 }).rotate().png().toBuffer()
           const img = nativeImage.createFromBuffer(pngBuf)
           if (!img.isEmpty()) {
             clipboard.writeImage(img)
@@ -745,7 +925,7 @@ export function registerIpcHandlers(): void {
           }
         } catch {
           // fallback to nativeImage directly
-          const img = nativeImage.createFromPath(existing[0])
+          const img = nativeImage.createFromPath(singlePath)
           if (!img.isEmpty()) {
             clipboard.writeImage(img)
             return { ok: true }
@@ -755,10 +935,11 @@ export function registerIpcHandlers(): void {
       }
 
       if (process.platform === 'win32') {
-        const b64 = Buffer.from(JSON.stringify(existing), 'utf8').toString('base64')
+        // Stream UTF-8 JSON via stdin to completely bypass Win32's 32,767-char command-line limit
         const psScript = [
+          '[Console]::InputEncoding = [System.Text.Encoding]::UTF8',
           'Add-Type -AssemblyName System.Windows.Forms',
-          `$json = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${b64}'))`,
+          '$json = [Console]::In.ReadToEnd()',
           '$paths = ConvertFrom-Json $json',
           'if ($paths -is [string]) { $paths = @($paths) }',
           '$list = New-Object System.Collections.Specialized.StringCollection',
@@ -767,19 +948,49 @@ export function registerIpcHandlers(): void {
         ].join('; ')
 
         return new Promise((resolve) => {
-          execFile(
-            'powershell.exe',
-            ['-NoProfile', '-NonInteractive', '-STA', '-Command', psScript],
-            { timeout: 6000 },
-            (err) => {
-              if (err) {
-                clipboard.writeText(existing.join('\n'))
-                resolve({ ok: false, error: '复制文件到系统剪贴板失败' })
-              } else {
-                resolve({ ok: true })
+          let settled = false
+          const finish = (res: { ok: boolean; error?: string }) => {
+            if (settled) return
+            settled = true
+            resolve(res)
+          }
+
+          try {
+            const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-Command', psScript], {
+              windowsHide: true,
+              stdio: ['pipe', 'ignore', 'ignore']
+            })
+            const timer = setTimeout(() => {
+              try {
+                child.kill()
+              } catch {
+                // ignore
               }
-            }
-          )
+              clipboard.writeText(existing.join('\n'))
+              finish({ ok: false, error: '复制文件到系统剪贴板超时' })
+            }, 10000)
+
+            child.on('error', () => {
+              clearTimeout(timer)
+              clipboard.writeText(existing.join('\n'))
+              finish({ ok: false, error: '复制文件到系统剪贴板失败' })
+            })
+            child.on('close', (code) => {
+              clearTimeout(timer)
+              if (code === 0) {
+                finish({ ok: true })
+              } else {
+                clipboard.writeText(existing.join('\n'))
+                finish({ ok: false, error: '复制文件到系统剪贴板失败' })
+              }
+            })
+
+            child.stdin.on('error', () => undefined)
+            child.stdin.end(Buffer.from(JSON.stringify(existing), 'utf8'))
+          } catch {
+            clipboard.writeText(existing.join('\n'))
+            finish({ ok: false, error: '复制文件到系统剪贴板失败' })
+          }
         })
       }
 
@@ -789,12 +1000,24 @@ export function registerIpcHandlers(): void {
   )
 
   ipcMain.on('system:startDragOut', (event, filePaths: string[], thumbPath?: string | null) => {
+    const notifyDragEnded = () => {
+      setTimeout(() => {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('event:drag-out-ended')
+        }
+      }, 160)
+    }
+
     const existing = (Array.isArray(filePaths) ? filePaths : []).filter((p) => p && fs.existsSync(p))
-    if (existing.length === 0) return
+    if (existing.length === 0) {
+      notifyDragEnded()
+      return
+    }
 
     let iconImg: Electron.NativeImage | null = null
-    if (thumbPath) {
-      const thumbFull = path.join(getThumbCacheDir(), thumbPath)
+    const cleanThumb = stripThumbVersion(thumbPath)
+    if (cleanThumb) {
+      const thumbFull = path.join(getThumbCacheDir(), cleanThumb)
       if (fs.existsSync(thumbFull)) {
         try {
           const loaded = nativeImage.createFromBuffer(fs.readFileSync(thumbFull))
@@ -831,6 +1054,10 @@ export function registerIpcHandlers(): void {
       })
     } catch {
       // ignore drag errors
+    } finally {
+      if (process.platform === 'win32') {
+        notifyDragEnded()
+      }
     }
   })
 
@@ -841,6 +1068,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('quickSearch:openAssetInMain', (_e, assetId: number) => {
     openAssetInMainWindow(assetId)
   })
+
+  ipcMain.handle('quickSearch:getShortcutStatus', () => getQuickSearchShortcutStatus())
 
   ipcMain.handle('system:checkFfmpeg', () => resolveFfmpeg(true))
   ipcMain.handle('system:getAppInfo', () => getAppInfo())

@@ -165,6 +165,70 @@ export function isReadableTextExt(ext: string): boolean {
   return TEXT_EXTS.has(e) && e !== '.pdf'
 }
 
+export function stripThumbVersion(thumbPath: string | null | undefined): string {
+  if (!thumbPath) return ''
+  const qIdx = thumbPath.indexOf('?')
+  return qIdx >= 0 ? thumbPath.slice(0, qIdx) : thumbPath
+}
+
+function trimIncompleteUtf8Tail(buf: Uint8Array): Uint8Array {
+  const len = buf.length
+  if (len === 0) return buf
+  let i = len - 1
+  const minIdx = Math.max(0, len - 4)
+  while (i >= minIdx && (buf[i] & 0xc0) === 0x80) {
+    i--
+  }
+  if (i < minIdx) return buf
+  const lead = buf[i]
+  if (lead < 0x80) {
+    return i === len - 1 ? buf : buf.subarray(0, i + 1)
+  }
+  let expectedLen = 1
+  if ((lead & 0xe0) === 0xc0) expectedLen = 2
+  else if ((lead & 0xf0) === 0xe0) expectedLen = 3
+  else if ((lead & 0xf8) === 0xf0) expectedLen = 4
+  else return buf
+  const actualRemaining = len - i
+  return actualRemaining < expectedLen ? buf.subarray(0, i) : buf
+}
+
+/**
+ * Decodes UTF-8 / UTF-16 BOM / legacy Chinese GBK & GB18030 text buffers cleanly.
+ * When `isTruncated` is true (e.g. reading a 1KB/4KB/512KB prefix), incomplete trailing
+ * UTF-8 multi-byte sequences are trimmed before fatal UTF-8 validation so valid UTF-8
+ * CJK files never falsely fall back to GB18030.
+ */
+export function decodeTextBuffer(buf: Uint8Array, isTruncated = false): string {
+  if (!buf || buf.length === 0) return ''
+
+  // Check BOMs first
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
+    const body = isTruncated ? trimIncompleteUtf8Tail(buf.subarray(3)) : buf.subarray(3)
+    return new TextDecoder('utf-8', { fatal: false }).decode(body)
+  }
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) {
+    const body = buf.subarray(2, buf.length - ((buf.length - 2) % 2))
+    return new TextDecoder('utf-16le', { fatal: false }).decode(body)
+  }
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) {
+    const body = buf.subarray(2, buf.length - ((buf.length - 2) % 2))
+    return new TextDecoder('utf-16be', { fatal: false }).decode(body)
+  }
+
+  const utf8Candidate = isTruncated ? trimIncompleteUtf8Tail(buf) : buf
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(utf8Candidate)
+  } catch {
+    try {
+      const decoded = new TextDecoder('gb18030', { fatal: false }).decode(buf)
+      return isTruncated ? decoded.replace(/\uFFFD+$/, '') : decoded
+    } catch {
+      return new TextDecoder('utf-8', { fatal: false }).decode(utf8Candidate)
+    }
+  }
+}
+
 export function formatFileSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '0 B'
   if (bytes < 1024) return `${bytes} B`

@@ -1,4 +1,5 @@
 import fs from 'fs'
+import path from 'path'
 import chokidar, { type FSWatcher } from 'chokidar'
 import { listSourceRoots } from '../db/repositories'
 import type { SourceRoot } from '@shared/types'
@@ -27,7 +28,16 @@ class SourceWatcherManager {
     if (this.watchers.has(root.id)) return
     if (!fs.existsSync(root.path)) return
 
-    const ignoreSet = new Set(root.ignorePatterns.map((p) => p.toLowerCase()))
+    const resolvedRoot = path.resolve(root.path)
+    const exactIgnoreNames = new Set<string>()
+    const suffixIgnorePatterns: string[] = []
+    for (const raw of root.ignorePatterns) {
+      const p = raw.trim().toLowerCase()
+      if (!p) continue
+      if (p.startsWith('*.')) suffixIgnorePatterns.push(p.slice(1))
+      else exactIgnoreNames.add(p)
+    }
+
     const watcher = chokidar.watch(root.path, {
       ignoreInitial: true,
       persistent: true,
@@ -36,13 +46,16 @@ class SourceWatcherManager {
         pollInterval: 200
       },
       ignored: (targetPath: string) => {
-        const lower = targetPath.toLowerCase()
-        for (const p of ignoreSet) {
-          if (p.startsWith('*.')) {
-            if (lower.endsWith(p.slice(1))) return true
-          } else if (lower.includes(`\\${p}\\`) || lower.endsWith(`\\${p}`) || lower.includes(`/${p}/`)) {
-            return true
-          }
+        const rel = path.relative(resolvedRoot, path.resolve(targetPath))
+        if (!rel || rel === '.' || rel.startsWith('..')) return false
+        const segments = rel.toLowerCase().split(/[\\/]+/).filter(Boolean)
+        if (segments.length === 0) return false
+        for (const seg of segments) {
+          if (exactIgnoreNames.has(seg)) return true
+        }
+        const leaf = segments[segments.length - 1]
+        for (const suf of suffixIgnorePatterns) {
+          if (leaf.endsWith(suf)) return true
         }
         return false
       }

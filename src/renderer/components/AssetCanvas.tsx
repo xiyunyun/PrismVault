@@ -370,10 +370,15 @@ export const AssetCanvas: React.FC<AssetCanvasProps> = ({ hidden = false }) => {
   }, [])
 
   const handleAddSource = async () => {
-    const added = await window.api.sources.pickAndAdd()
-    if (added) {
-      showToast(`已挂载目录「${added.alias}」，正在扫描...`, 'success')
-      await refreshAll()
+    try {
+      const added = await window.api.sources.pickAndAdd()
+      if (added) {
+        showToast(`已挂载目录「${added.alias}」，正在扫描...`, 'success')
+        await refreshAll()
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': Error:\s*/, '') : String(err)
+      showToast(msg || '添加索引目录失败', 'error')
     }
   }
 
@@ -407,17 +412,31 @@ export const AssetCanvas: React.FC<AssetCanvasProps> = ({ hidden = false }) => {
       // Track internal drag IDs so LeftSidebar groups can accept drops while Native OS Drag-Out
       // lets the user drag real files directly out into Photoshop / Blender / AutoCAD / WeChat / Explorer!
       setInternalDragAssetIds(idsToDrag)
+      const removeListeners = () => {
+        window.removeEventListener('mouseup', clearDragState, true)
+        window.removeEventListener('drop', clearDragState, true)
+        window.removeEventListener('dragend', clearDragState, true)
+        window.removeEventListener('mousemove', onMoveCheckButtons, true)
+        window.removeEventListener('mouseenter', onMoveCheckButtons, true)
+      }
       const clearDragState = () => {
         setTimeout(() => {
           useLibraryStore.getState().setInternalDragAssetIds([])
         }, 120)
-        window.removeEventListener('mouseup', clearDragState, true)
-        window.removeEventListener('drop', clearDragState, true)
-        window.removeEventListener('dragend', clearDragState, true)
+        removeListeners()
+      }
+      const onMoveCheckButtons = (ev: MouseEvent) => {
+        // Normal mousemove/mouseenter only fires when no OS drag is active; if left button is up, clear stale drag IDs
+        if ((ev.buttons & 1) === 0) {
+          useLibraryStore.getState().setInternalDragAssetIds([])
+          removeListeners()
+        }
       }
       window.addEventListener('mouseup', clearDragState, true)
       window.addEventListener('drop', clearDragState, true)
       window.addEventListener('dragend', clearDragState, true)
+      window.addEventListener('mousemove', onMoveCheckButtons, true)
+      window.addEventListener('mouseenter', onMoveCheckButtons, true)
 
       if (filePaths.length > 0 && typeof window.api.system.startDragOut === 'function') {
         e.preventDefault()
@@ -673,18 +692,16 @@ export const AssetCanvas: React.FC<AssetCanvasProps> = ({ hidden = false }) => {
               <button
                 type="button"
                 onClick={async () => {
+                  const totalHidden = Math.max(assets.length, totalAssets)
                   const ok = await confirm({
-                    title: `恢复全部已隐藏素材（${assets.length} 项）`,
-                    message: `确定将当前列表中的 ${assets.length} 个已隐藏素材全部恢复到主库中显示吗？`,
+                    title: `恢复全部已隐藏素材（${totalHidden} 项）`,
+                    message: `确定将全部 ${totalHidden} 个已隐藏素材恢复到主库中显示吗？`,
                     confirmText: '全部恢复',
                     variant: 'info'
                   })
                   if (!ok) return
-                  await window.api.assets.setStatus(
-                    assets.map((a) => a.id),
-                    'active'
-                  )
-                  showToast(`已恢复显示 ${assets.length} 个素材`, 'success')
+                  const restored = await window.api.assets.restoreAllHidden()
+                  showToast(`已恢复显示 ${restored} 个素材`, 'success')
                   await refreshAll()
                 }}
                 className="h-8 px-3 rounded-md text-white text-xs font-medium hover:opacity-95 cursor-pointer shrink-0 ml-3"

@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+import sharp from 'sharp'
 import { getAllSettings } from '../db/repositories'
 import type { FfmpegStatus } from '@shared/types'
 
@@ -98,6 +99,8 @@ export async function probeVideo(filePath: string): Promise<VideoProbeInfo | nul
         r_frame_rate?: string
         avg_frame_rate?: string
         duration?: string
+        tags?: { rotate?: string | number }
+        side_data_list?: Array<{ rotation?: string | number }>
       }>
       format?: {
         duration?: string
@@ -121,9 +124,22 @@ export async function probeVideo(filePath: string): Promise<VideoProbeInfo | nul
     const duration = rawDuration ? Number(rawDuration) : null
     const bitrate = parsed.format?.bit_rate ? Number(parsed.format.bit_rate) : undefined
 
+    let width = vStream?.width ?? null
+    let height = vStream?.height ?? null
+    let rotDeg = 0
+    if (vStream?.tags?.rotate != null) {
+      rotDeg = Number(vStream.tags.rotate) || 0
+    } else if (Array.isArray(vStream?.side_data_list)) {
+      const rotEntry = vStream.side_data_list.find((d) => d && d.rotation != null)
+      if (rotEntry) rotDeg = Number(rotEntry.rotation) || 0
+    }
+    if (width && height && Math.abs(Math.round(rotDeg)) % 180 === 90) {
+      ;[width, height] = [height, width]
+    }
+
     return {
-      width: vStream?.width ?? null,
-      height: vStream?.height ?? null,
+      width,
+      height,
       duration: duration != null && Number.isFinite(duration) ? duration : null,
       fps,
       videoCodec: vStream?.codec_name,
@@ -171,10 +187,41 @@ export async function extractVideoFrame(
         ],
         { timeout: 15000 }
       )
-      return fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0
+      if (fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
+        return true
+      }
+    } catch {
+      // Fall back to universal built-in PNG encoder piped through sharp -> WebP
+    }
+
+    try {
+      const { stdout } = await execFileAsync(
+        status.ffmpegPath!,
+        [
+          '-ss',
+          ss.toFixed(2),
+          '-i',
+          filePath,
+          '-vframes',
+          '1',
+          '-vf',
+          "scale='min(480,iw)':-2",
+          '-f',
+          'image2pipe',
+          '-c:v',
+          'png',
+          '-'
+        ],
+        { timeout: 15000, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 }
+      )
+      if (stdout && stdout.length > 32) {
+        await sharp(stdout).webp({ quality: 80 }).toFile(outputPath)
+        return fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0
+      }
     } catch {
       return false
     }
+    return false
   }
 
   if (await runCapture(seekSec)) return true
